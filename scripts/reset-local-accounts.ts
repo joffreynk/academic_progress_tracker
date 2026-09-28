@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hash } from 'bcryptjs';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../src/db';
 import {
   academicYears,
@@ -33,6 +33,7 @@ const credentials = {
 };
 
 async function clearDatabase() {
+  await db.run(sql`PRAGMA foreign_keys = OFF;`);
   const tables = [
     behaviourObservations,
     monthlyRuleSnapshots,
@@ -40,12 +41,12 @@ async function clearDatabase() {
     records,
     lessons,
     assignments,
+    students,
+    classes,
     terms,
     academicYears,
     subjects,
-    classes,
     grades,
-    students,
     teachers,
     settings,
     auditLogs,
@@ -58,6 +59,7 @@ async function clearDatabase() {
   for (const table of tables) {
     await db.delete(table as any);
   }
+  await db.run(sql`PRAGMA foreign_keys = ON;`);
 }
 
 async function main() {

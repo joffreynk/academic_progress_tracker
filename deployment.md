@@ -51,3 +51,21 @@ This matches the code in `src/db/index.ts`, which prefers the Wrangler D1 bindin
 - This project uses SQLite/D1, not PostgreSQL.
 - Keep all secrets out of version control.
 - The app is compatible with Wrangler D1 and local SQLite development.
+
+
+6. Deploying to Cloudflare with Wrangler
+When you are ready to deploy to Cloudflare:
+
+Create your remote D1 database (if not already done):
+bash
+npx wrangler d1 create student-academic-reporting-db
+Paste the returned database ID into 
+
+wrangler.jsonc
+ under database_id.
+Apply migrations to Cloudflare D1:
+bash
+npx wrangler d1 migrations apply student-academic-reporting-db --remote
+Deploy the application:
+bash
+npm run wrangler:deploy

@@ -28,6 +28,15 @@ yarn-error.log*
 logins.text
 logins.txt
 
+# databases & local state
+.pgdata
+.data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+.wrangler/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

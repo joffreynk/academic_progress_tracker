@@ -5,8 +5,8 @@ dotenv.config();
 export default defineConfig({
   dialect: 'sqlite',
   schema: './src/db/schema.ts',
-  out: './drizzle',
+  out: './d1/migrations',
   dbCredentials: {
-    url: process.env.DATABASE_URL || './.data/local.db',
+    url: process.env.DATABASE_URL || 'file:./.data/local.db',
   },
 });

@@ -6,11 +6,15 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "student-academic-reporting-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "2d13a1a3-29ae-48c7-b461-4bc2ce5f94a2",
       "migrations_dir": "d1/migrations"
     }
   ]
