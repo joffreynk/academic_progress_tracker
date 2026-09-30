@@ -36,6 +36,8 @@ logins.txt
 *.sqlite
 *.sqlite3
 .wrangler/
+.kilo
+.open-next
 
 # typescript
 *.tsbuildinfo

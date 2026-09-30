@@ -27,6 +27,7 @@ export type ModalConfig =
       currentDate: string;
       minDate: string;
       maxDate: string;
+      windowDays: number;
       onConfirm: (newDate: string, reason: string) => void;
     }
   | {
@@ -179,7 +180,7 @@ function DateCorrectionModal({ config, onClose }: { config: Extract<ModalConfig,
       </div>
       <div className="modal-body">
         <p style={{ fontSize: 13, color: '#748792' }}>
-          Correct an inadvertent date entry. The new date must remain within the 14-day policy window ({config.minDate} to {config.maxDate}).
+          Correct an inadvertent date entry. The new date must remain within the {config.windowDays}-day policy window ({config.minDate} to {config.maxDate}).
         </p>
         <label>
           New Lesson Date

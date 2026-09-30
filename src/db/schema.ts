@@ -210,9 +210,10 @@ export const records = sqliteTable('daily_student_records', {
   studentCodeSnapshot: text('student_code_snapshot'),
   attendanceStatus: text('attendance_status').notNull(),
   performance: text('performance'),
-  participation: text('participation'),
-  homework: text('homework'),
   conduct: text('conduct'),
+  punctuality: text('punctuality'),
+  homework: text('homework'),
+  participation: text('participation'),
   comment: text('comment'),
   createdAt: stamp(),
   updatedAt: updated(),
@@ -235,7 +236,7 @@ export const auditLogs = sqliteTable('audit_logs', {
   index('audit_org_date_idx').on(t.organizationId, t.createdAt),
 ]);
 
-// §64 settings – configurable thresholds; §44 performance; §47 homework; §48 punctuality
+// §64 settings – configurable thresholds; §44 performance; §47 homework; §48 punctuality; §39 admin date override
 export const settings = sqliteTable('settings', {
   id: id(),
   organizationId: text('organization_id').notNull().unique().references(() => organizations.id),
@@ -244,6 +245,9 @@ export const settings = sqliteTable('settings', {
   goodThreshold: real('good_threshold').notNull().default(1.65),
   homeworkUsuallyThreshold: real('homework_usually_threshold').notNull().default(0.8),
   punctualityOccasionallyMax: real('punctuality_occasionally_max').notNull().default(0.1),
+  adminDateOverrideDays: integer('admin_date_override_days').notNull().default(14),
+  adminCanOverrideFuture: integer('admin_can_override_future', { mode: 'boolean' }).notNull().default(true),
+  adminOverrideRequiresReason: integer('admin_override_requires_reason', { mode: 'boolean' }).notNull().default(true),
   updatedAt: updated(),
 });
 

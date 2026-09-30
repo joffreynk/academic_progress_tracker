@@ -43,7 +43,33 @@ import StudentProfileModal from '@/components/StudentProfileModal';
 import DataQualityView from '@/components/DataQualityView';
 import StatisticsView from '@/components/StatisticsView';
 import BehaviourView from '@/components/BehaviourView';
-import { buildNormalRecordDefaults, type Observation, type Rules } from '@/lib/reporting';
+import PeriodPicker from '@/components/PeriodPicker';
+import { buildNormalRecordDefaults, resultTrend, type Observation, type Rules, type SubjectComparison } from '@/lib/reporting';
+import { thisMonthPeriod, buildPeriod, periodLabel, periodSlug, type Period } from '@/lib/period';
+import { downloadClassSummaryPdf } from '@/lib/reportPdf';
+
+const TIMEZONE_OPTIONS = [
+  'Africa/Bujumbura',
+  'Africa/Cairo',
+  'Africa/Johannesburg',
+  'Africa/Lagos',
+  'Africa/Nairobi',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/New_York',
+  'Asia/Dubai',
+  'Asia/Karachi',
+  'Asia/Kolkata',
+  'Asia/Manila',
+  'Asia/Singapore',
+  'Australia/Sydney',
+  'Europe/Amsterdam',
+  'Europe/Berlin',
+  'Europe/London',
+  'Europe/Paris',
+  'UTC',
+];
 
 type User = { id: string; name: string; role: string; organizationId: string | null };
 type Assignment = { id: string; classId: string; className: string; subjectId: string; subjectName: string; academicYearId: string; yearName: string; teacherName: string };
@@ -58,6 +84,8 @@ type Ref = {
   assignments: { id: string; teacherId: string; classId: string; subjectId: string; academicYearId: string; active?: boolean }[];
   today: string;
   minDate: string;
+  windowDays: number;
+  allowFutureDates?: boolean;
 };
 
 type Summary = {
@@ -78,6 +106,7 @@ type Summary = {
   participationResult: string;
   homeworkResult: string;
   conductResult: string;
+  punctuality: Record<string, number>;
   punctualityResult: string;
   topics: string[];
   observations: { date: string; comment: string; subject: string }[];
@@ -169,6 +198,9 @@ async function post(action: string, data: unknown, extra: Record<string, unknown
   return res;
 }
 
+const resolve = ({ from, to }: { from: string; to: string }): Period | null => (from && to ? buildPeriod(from, to) : null);
+const periodText = (period: Period) => periodLabel(period);
+
 function Badge({ status }: { status: string }) {
   return <span className={`badge badge-${status.toLowerCase().replace(/_/g, '-')}`}>{status.replace('_', ' ')}</span>;
 }
@@ -182,7 +214,35 @@ function Empty({ title, detail }: { title: string; detail: string }) {
   );
 }
 
+const NOT_APPLICABLE = (
+  <span
+    style={{
+      display: 'inline-block',
+      padding: '4px 10px',
+      borderRadius: 4,
+      background: '#f1f5f9',
+      color: '#94a3b8',
+      fontSize: 11,
+      fontWeight: 700,
+      letterSpacing: 0.4,
+    }}
+  >
+    N/A
+  </span>
+);
+
+const naCell = (notApplicable: boolean, control: React.ReactNode) =>
+  notApplicable ? NOT_APPLICABLE : control;
+
 const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+
+const shiftDays = (date: string, days: number) => {
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+const dayLabel = (days: number) => `${days} day${days === 1 ? '' : 's'}`;
 
 export default function Home() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
@@ -191,6 +251,7 @@ export default function Home() {
     organization: string;
     today: string;
     minDate: string;
+    windowDays: number;
     counts: { students: number; teachers: number; classes: number; subjects: number; totalReports: number };
     statusCounts: Record<string, number>;
     assignedClasses: string[];
@@ -213,14 +274,14 @@ export default function Home() {
   const [date, setDate] = useState('');
   const [topic, setTopic] = useState('');
   const [lessonId, setLessonId] = useState<string | null>(null);
-  const [records, setRecords] = useState<Record<string, { attendance: string; performance: string; participation: string; homework: string; conduct: string; comment: string }>>({});
+  const [records, setRecords] = useState<Record<string, { attendance: string; performance: string; conduct: string; punctuality: string; homework: string; participation: string; comment: string }>>({});
   const [reports, setReports] = useState<{ id: string; lessonDate: string; topic: string; status: string; className: string; subjectName: string; teacherName: string; reviewComment?: string | null; recordsCount?: number; rosterCount?: number; completionRate?: number }[]>([]);
   
   // History filter state
   const [reportFilterClass, setReportFilterClass] = useState('');
   const [reportFilterSubject, setReportFilterSubject] = useState('');
   const [reportFilterStatus, setReportFilterStatus] = useState('');
-  const [reportFilterMonth, setReportFilterMonth] = useState('');
+  const [reportFilterPeriod, setReportFilterPeriod] = useState({ from: '', to: '' });
 
   const [reviewDetail, setReviewDetail] = useState<{ lesson: any; records: any[] } | null>(null);
   const [studentProfile, setStudentProfile] = useState<{ student: any; timeline: any[]; significant: any[] } | null>(null);
@@ -228,6 +289,7 @@ export default function Home() {
   const [search, setSearch] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lessonValidationAttempted, setLessonValidationAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [entity, setEntity] = useState('year');
   const [form, setForm] = useState<Record<string, any>>({});
@@ -238,7 +300,7 @@ export default function Home() {
   const [mobile, setMobile] = useState(false);
 
   // Monthly state
-  const [monthlyMonth, setMonthlyMonth] = useState('');
+  const [monthlyPeriod, setMonthlyPeriod] = useState({ from: '', to: '' });
   const [monthlyClass, setMonthlyClass] = useState('');
   const [monthlySubject, setMonthlySubject] = useState('');
   const [monthlyStudent, setMonthlyStudent] = useState('');
@@ -248,7 +310,7 @@ export default function Home() {
   const [monthlyTeacher, setMonthlyTeacher] = useState('');
   const [monthlySortCol, setMonthlySortCol] = useState<string>('studentName');
   const [monthlySortDir, setMonthlySortDir] = useState<'asc' | 'desc'>('asc');
-  const [monthly, setMonthly] = useState<{ organization: string; month: string; rules: Rules; summaries: Summary[]; raw: Observation[] } | null>(null);
+  const [monthly, setMonthly] = useState<{ organization: string; period: Period; closedMonths: string[]; rules: Rules; summaries: Summary[]; comparison: SubjectComparison[]; raw: Observation[] } | null>(null);
 
   // Import state
   const [importKind, setImportKind] = useState<'students' | 'teachers' | 'assignments'>('students');
@@ -278,10 +340,11 @@ export default function Home() {
   const refresh = async () => {
     const [o, r] = await Promise.all([api('overview'), api('reference').catch(() => null)]);
     setOverview(o);
+    const today = o?.today || r?.today;
     if (r) {
       setRef(r);
-      setDate((d) => d || r.today);
-      setMonthlyMonth((m) => m || r.today.slice(0, 7));
+      setDate((d) => d || today);
+      setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(today).from, to: today }));
     }
   };
 
@@ -301,12 +364,13 @@ export default function Home() {
       .then((r) => {
         if (r) {
           setRef(r);
-          setDate((d) => d || r.today);
-          setMonthlyMonth((m) => m || r.today.slice(0, 7));
+          const today = r.today || overview?.today;
+          setDate((d) => d || today);
+          setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(today).from, to: today }));
         }
       })
       .catch(() => null);
-  }, [user]);
+  }, [user, overview?.today]);
 
   useEffect(() => {
     if (!user) return;
@@ -315,7 +379,8 @@ export default function Home() {
         ...(reportFilterClass ? { classId: reportFilterClass } : {}),
         ...(reportFilterSubject ? { subjectId: reportFilterSubject } : {}),
         ...(reportFilterStatus ? { status: reportFilterStatus } : {}),
-        ...(reportFilterMonth ? { month: reportFilterMonth } : {}),
+        ...(reportFilterPeriod.from ? { from: reportFilterPeriod.from } : {}),
+        ...(reportFilterPeriod.to ? { to: reportFilterPeriod.to } : {}),
       })
         .then((d) => setReports(d.reports))
         .catch((e) => setError(e.message));
@@ -347,7 +412,7 @@ export default function Home() {
         .then(setConfig)
         .catch((e) => setError(e.message));
     }
-  }, [page, user, selectedClass, search, studentPage, reportFilterClass, reportFilterSubject, reportFilterStatus, reportFilterMonth]);
+  }, [page, user, selectedClass, search, studentPage, reportFilterClass, reportFilterSubject, reportFilterStatus, reportFilterPeriod.from, reportFilterPeriod.to]);
 
   useEffect(() => {
     if (page === 'new' && selectedClass && ref) {
@@ -401,7 +466,7 @@ export default function Home() {
     });
   };
 
-  const activeYear = ref?.years.find((y) => y.active) || ref?.years[0];
+  const activeYear = ref?.years?.find((y) => y.active) || ref?.years?.[0];
 
   const currentClassAssignment = useMemo(() => {
     if (!overview || !selectedClass || !selectedSubject) return null;
@@ -446,9 +511,10 @@ export default function Home() {
           map[r.studentId] = {
             attendance: r.attendanceStatus,
             performance: r.performance || 'GOOD',
-            participation: r.participation || 'ACTIVE',
-            homework: r.homework || 'COMPLETED',
             conduct: r.conduct || 'GOOD',
+            punctuality: r.punctuality || 'ALWAYS_ON_TIME',
+            homework: r.homework || 'ALWAYS_COMPLETED',
+            participation: r.participation || 'ACTIVE',
             comment: r.comment || '',
           };
         });
@@ -462,8 +528,16 @@ export default function Home() {
 
   // Submit report handler triggering Modal
   const initiateSubmitLesson = (isSubmit: boolean) => {
-    if (!activeYear || !selectedClass || !selectedSubject || !date || !topic.trim()) {
-      setError('Please select a class, subject, date, and enter a lesson topic.');
+    setLessonValidationAttempted(true);
+    const academicYearId = activeYear?.id;
+    const missing: string[] = [];
+    if (!academicYearId) missing.push('active academic year');
+    if (!selectedClass) missing.push('class');
+    if (!selectedSubject) missing.push('subject');
+    if (!date) missing.push('lesson date');
+    if (!topic.trim()) missing.push('lesson topic');
+    if (missing.length) {
+      setError(`Please complete the following before continuing: ${missing.join(', ')}.`);
       return;
     }
     const studentList = students.filter((s) => s.classId === selectedClass);
@@ -473,14 +547,15 @@ export default function Home() {
     }
 
     const recs = studentList.map((s) => {
-      const r = records[s.id] || { attendance: 'PRESENT', performance: 'GOOD', participation: 'ACTIVE', homework: 'COMPLETED', conduct: 'GOOD', comment: '' };
+      const r = records[s.id] || { attendance: 'PRESENT', performance: 'GOOD', conduct: 'GOOD', punctuality: 'ALWAYS_ON_TIME', homework: 'ALWAYS_COMPLETED', participation: 'ACTIVE', comment: '' };
       return {
         studentId: s.id,
         attendanceStatus: r.attendance as any,
         performance: r.attendance === 'ABSENT' ? null : (r.performance as any),
-        participation: r.attendance === 'ABSENT' ? null : (r.participation as any),
-        homework: r.attendance === 'ABSENT' ? null : (r.homework as any),
         conduct: r.attendance === 'ABSENT' ? null : (r.conduct as any),
+        punctuality: r.attendance === 'ABSENT' ? null : (r.punctuality as any),
+        homework: r.attendance === 'ABSENT' ? null : (r.homework as any),
+        participation: r.attendance === 'ABSENT' ? null : (r.participation as any),
         comment: r.comment.trim() || null,
       };
     });
@@ -495,7 +570,7 @@ export default function Home() {
           id: lessonId || undefined,
           classId: selectedClass,
           subjectId: selectedSubject,
-          academicYearId: activeYear.id,
+          academicYearId,
           lessonDate: date,
           topic: topic.trim(),
           submit: submitFlag,
@@ -567,10 +642,11 @@ export default function Home() {
       type: 'date_correction',
       currentDate,
       minDate: ref.minDate,
-      maxDate: ref.today,
+      maxDate: ref.allowFutureDates ? shiftDays(ref.today, ref.windowDays) : ref.today,
+      windowDays: ref.windowDays,
       onConfirm: (newDate, reason) => {
         run(async () => {
-          await post('correctLessonDate', { id, newDate, reason });
+          await post('correctLessonDate', { id, lessonDate: newDate, reason });
           setNotice('Lesson date corrected successfully.');
           setReviewDetail(null);
           await refresh();
@@ -600,7 +676,9 @@ export default function Home() {
   // Monthly report fetch
   const getMonthly = () => {
     run(async () => {
-      const p: Record<string, string> = { month: monthlyMonth };
+      const period = resolve(monthlyPeriod);
+      if (!period) throw new Error('Choose a valid reporting period before generating the report.');
+      const p: Record<string, string> = { from: period.from, to: period.to };
       if (monthlyClass) p.classId = monthlyClass;
       if (monthlySubject) p.subjectId = monthlySubject;
       if (monthlyStudent) p.studentId = monthlyStudent;
@@ -608,8 +686,16 @@ export default function Home() {
       if (monthlyTerm) p.termId = monthlyTerm;
       if (monthlyGrade) p.gradeId = monthlyGrade;
       if (monthlyTeacher) p.teacherId = monthlyTeacher;
-      const data = await api('monthly', p);
-      setMonthly(data);
+      const d = await api('monthly', p);
+      setMonthly({
+        organization: d.organization,
+        period: d.period,
+        closedMonths: d.closedMonths ?? [],
+        rules: d.rules,
+        summaries: d.summaries,
+        comparison: d.comparison ?? [],
+        raw: d.data ?? [],
+      });
     });
   };
 
@@ -644,7 +730,7 @@ export default function Home() {
     const sheet = book.addWorksheet(fullClass ? 'Full Class Follow-Up' : 'Subject Follow-Up');
 
     sheet.addRow([fullClass ? 'CLASS MONTHLY STUDENT ACADEMIC & BEHAVIOURAL FOLLOW-UP' : 'CLASS SUBJECT MONTHLY REPORT']);
-    sheet.addRow([monthly.organization, `Reporting Month: ${monthly.month}`]);
+    sheet.addRow([monthly.organization, `Reporting Period: ${periodText(monthly.period)}`]);
     sheet.addRow([
       'Student Name',
       'Student ID',
@@ -687,7 +773,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${monthly.organization.replace(/\s+/g, '_')}-${monthly.month}-${fullClass ? 'Class-Report' : 'Subject-Report'}.xlsx`;
+    a.download = `${monthly.organization.replace(/\s+/g, '_')}-${periodSlug(monthly.period)}-${fullClass ? 'Class-Report' : 'Subject-Report'}.xlsx`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
@@ -716,7 +802,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${monthly.organization.replace(/\s+/g, '_')}-${monthly.month}-monthly.csv`;
+    a.download = `${monthly.organization.replace(/\s+/g, '_')}-${periodSlug(monthly.period)}-monthly.csv`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
@@ -1152,6 +1238,7 @@ export default function Home() {
                               onClick={() => {
                                 setSelectedClass(a.classId);
                                 setSelectedSubject(a.subjectId);
+                                setLessonValidationAttempted(false);
                                 setPage('new');
                               }}
                             >
@@ -1208,7 +1295,7 @@ export default function Home() {
                     View All Reports <ChevronRight size={14} />
                   </button>
                 </div>
-                {overview.recent.length === 0 ? (
+                {!overview.recent?.length ? (
                   <Empty title="No recent lessons" detail="Recorded lessons will appear here." />
                 ) : (
                   <div className="table-scroll">
@@ -1255,7 +1342,10 @@ export default function Home() {
                 <div>
                   <div className="eyebrow">DAILY LESSON CAPTURE</div>
                   <h2>{lessonId ? 'Edit Lesson Report' : 'Record Daily Lesson'}</h2>
-                  <p>Policy window: {ref?.minDate} to {ref?.today} (14 days inclusive)</p>
+                  <p>
+                    Policy window: {ref?.minDate} to {ref?.today} (
+                    {dayLabel(ref?.windowDays ?? 14)} inclusive)
+                  </p>
                 </div>
                 {lessonId && (
                   <button
@@ -1263,6 +1353,7 @@ export default function Home() {
                     onClick={() => {
                       setLessonId(null);
                       setTopic('');
+                      setLessonValidationAttempted(false);
                     }}
                   >
                     Start New Report
@@ -1279,6 +1370,7 @@ export default function Home() {
                     onChange={(e) => {
                       setSelectedClass(e.target.value);
                       setSelectedSubject('');
+                      setLessonValidationAttempted(false);
                     }}
                   >
                     <option value="">Select Class</option>
@@ -1313,27 +1405,38 @@ export default function Home() {
                     onChange={(e) => setDate(e.target.value)}
                   />
                   <small style={{ color: '#748792', fontSize: 11, fontWeight: 600 }}>
-                    Allowed range: {ref?.minDate || '—'} to {ref?.today || '—'} · You can record lessons from the last 14 days up to today.
+                    Allowed range: {ref?.minDate || '—'} to {ref?.today || '—'} · You can record
+                    lessons from the last {dayLabel(ref?.windowDays ?? 14)} up to today.
                   </small>
                 </label>
               </div>
 
               <label style={{ marginBottom: 16 }}>
-                Lesson Topic / Content Covered
+                Lesson Topic / Content Covered <span style={{ color: '#c0392b' }}>*</span>
                 <input
                   type="text"
                   required
                   placeholder="e.g. Chapter 4: Linear equations and problem solving..."
                   value={topic}
                   onChange={(e) => setTopic(e.target.value)}
+                  style={
+                    lessonValidationAttempted && !topic.trim()
+                      ? { borderColor: '#c67a53', background: '#fffaf6' }
+                      : undefined
+                  }
                 />
+                {lessonValidationAttempted && !topic.trim() && (
+                  <small style={{ color: '#c67a53', fontWeight: 600 }}>
+                    Required — enter the lesson topic before saving or submitting.
+                  </small>
+                )}
               </label>
 
               {/* Student Observations Table */}
               {selectedClass && (
                 <div style={{ marginTop: 20 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                    <h3>Student Attendance & Behaviour Observations ({students.filter((s) => s.classId === selectedClass).length} Students)</h3>
+                    <h3>Student Observations ({students.filter((s) => s.classId === selectedClass).length} Students)</h3>
                     <div style={{ display: 'flex', gap: 6 }}>
                       <button
                         className="btn outline"
@@ -1359,10 +1462,11 @@ export default function Home() {
                         <tr>
                           <th>Student</th>
                           <th>Attendance</th>
-                          <th>Performance</th>
-                          <th>Participation</th>
-                          <th>Homework</th>
-                          <th>Conduct</th>
+                          <th>Academic Performance</th>
+                          <th>Class Conduct</th>
+                          <th>Punctuality</th>
+                          <th>Homework & Assignments</th>
+                          <th>Participation in Class</th>
                           <th>Teacher Comments</th>
                         </tr>
                       </thead>
@@ -1373,9 +1477,10 @@ export default function Home() {
                             const r = records[s.id] || {
                               attendance: 'PRESENT',
                               performance: 'GOOD',
-                              participation: 'ACTIVE',
-                              homework: 'COMPLETED',
                               conduct: 'GOOD',
+                              punctuality: 'ALWAYS_ON_TIME',
+                              homework: 'ALWAYS_COMPLETED',
+                              participation: 'ACTIVE',
                               comment: '',
                             };
                             const isAbsent = r.attendance === 'ABSENT';
@@ -1396,96 +1501,125 @@ export default function Home() {
                                     }
                                   >
                                     <option value="PRESENT">Present</option>
-                                    <option value="LATE">Late</option>
+                                    <option value="LATE">Late coming</option>
                                     <option value="ABSENT">Absent</option>
                                   </select>
                                 </td>
                                 <td>
-                                  <select
-                                    disabled={isAbsent}
-                                    value={isAbsent ? '' : r.performance}
-                                    onChange={(e) =>
-                                      setRecords({
-                                        ...records,
-                                        [s.id]: { ...r, performance: e.target.value },
-                                      })
-                                    }
-                                  >
-                                    <option value="EXCELLENT">Excellent</option>
-                                    <option value="GOOD">Good</option>
-                                    <option value="NEEDS_IMPROVEMENT">Needs Improvement</option>
-                                  </select>
+                                  {naCell(
+                                    isAbsent,
+                                    <select
+                                      value={r.performance}
+                                      onChange={(e) =>
+                                        setRecords({
+                                          ...records,
+                                          [s.id]: { ...r, performance: e.target.value },
+                                        })
+                                      }
+                                    >
+                                      <option value="EXCELLENT">Excellent</option>
+                                      <option value="GOOD">Good</option>
+                                      <option value="NEEDS_IMPROVEMENT">Needs Improvement</option>
+                                    </select>
+                                  )}
                                 </td>
                                 <td>
-                                  <select
-                                    disabled={isAbsent}
-                                    value={isAbsent ? '' : r.participation}
-                                    onChange={(e) =>
-                                      setRecords({
-                                        ...records,
-                                        [s.id]: { ...r, participation: e.target.value },
-                                      })
-                                    }
-                                  >
-                                    <option value="ACTIVE">Active</option>
-                                    <option value="MODERATE">Moderate</option>
-                                    <option value="PASSIVE">Passive</option>
-                                  </select>
+                                  {naCell(
+                                    isAbsent,
+                                    <select
+                                      value={r.conduct}
+                                      onChange={(e) =>
+                                        setRecords({
+                                          ...records,
+                                          [s.id]: { ...r, conduct: e.target.value },
+                                        })
+                                      }
+                                    >
+                                      <option value="EXCELLENT">Excellent</option>
+                                      <option value="GOOD">Good</option>
+                                      <option value="NEEDS_IMPROVEMENT">Needs Improvement</option>
+                                    </select>
+                                  )}
                                 </td>
                                 <td>
-                                  <select
-                                    disabled={isAbsent}
-                                    value={isAbsent ? '' : r.homework}
-                                    onChange={(e) =>
-                                      setRecords({
-                                        ...records,
-                                        [s.id]: { ...r, homework: e.target.value },
-                                      })
-                                    }
-                                  >
-                                    <option value="COMPLETED">Completed</option>
-                                    <option value="NOT_COMPLETED">Not Completed</option>
-                                    <option value="NOT_APPLICABLE">Not Applicable</option>
-                                  </select>
+                                  {naCell(
+                                    isAbsent,
+                                    <select
+                                      value={r.punctuality}
+                                      onChange={(e) =>
+                                        setRecords({
+                                          ...records,
+                                          [s.id]: { ...r, punctuality: e.target.value },
+                                        })
+                                      }
+                                    >
+                                      <option value="ALWAYS_ON_TIME">Always On Time</option>
+                                      <option value="OCCASIONALLY_LATE">Occasionally Late</option>
+                                      <option value="FREQUENTLY_LATE">Frequently Late</option>
+                                    </select>
+                                  )}
                                 </td>
                                 <td>
-                                  <select
-                                    disabled={isAbsent}
-                                    value={isAbsent ? '' : r.conduct}
-                                    onChange={(e) =>
-                                      setRecords({
-                                        ...records,
-                                        [s.id]: { ...r, conduct: e.target.value },
-                                      })
-                                    }
-                                  >
-                                    <option value="EXCELLENT">Excellent</option>
-                                    <option value="GOOD">Good</option>
-                                    <option value="NEEDS_IMPROVEMENT">Needs Improvement</option>
-                                  </select>
+                                  {naCell(
+                                    isAbsent,
+                                    <select
+                                      value={r.homework}
+                                      onChange={(e) =>
+                                        setRecords({
+                                          ...records,
+                                          [s.id]: { ...r, homework: e.target.value },
+                                        })
+                                      }
+                                    >
+                                      <option value="ALWAYS_COMPLETED">Always Completed</option>
+                                      <option value="USUALLY_COMPLETED">Usually Completed</option>
+                                      <option value="RARELY_COMPLETED">Rarely Completed</option>
+                                    </select>
+                                  )}
                                 </td>
                                 <td>
-                                  <input
-                                    type="text"
-                                    placeholder={
-                                      r.performance === 'NEEDS_IMPROVEMENT' || r.conduct === 'NEEDS_IMPROVEMENT'
-                                        ? 'Mandatory comment for needs improvement...'
-                                        : 'Optional note...'
-                                    }
-                                    value={r.comment}
-                                    onChange={(e) =>
-                                      setRecords({
-                                        ...records,
-                                        [s.id]: { ...r, comment: e.target.value },
-                                      })
-                                    }
-                                    style={{
-                                      borderColor:
-                                        (r.performance === 'NEEDS_IMPROVEMENT' || r.conduct === 'NEEDS_IMPROVEMENT') && !r.comment.trim()
-                                          ? '#c67a53'
-                                          : undefined,
-                                    }}
-                                  />
+                                  {naCell(
+                                    isAbsent,
+                                    <select
+                                      value={r.participation}
+                                      onChange={(e) =>
+                                        setRecords({
+                                          ...records,
+                                          [s.id]: { ...r, participation: e.target.value },
+                                        })
+                                      }
+                                    >
+                                      <option value="ACTIVE">Active</option>
+                                      <option value="MODERATE">Moderate</option>
+                                      <option value="PASSIVE">Passive</option>
+                                    </select>
+                                  )}
+                                </td>
+                                <td>
+                                  {naCell(
+                                    isAbsent,
+                                    <input
+                                      type="text"
+                                      placeholder={
+                                        r.performance === 'NEEDS_IMPROVEMENT' || r.conduct === 'NEEDS_IMPROVEMENT'
+                                          ? 'Mandatory comment for needs improvement...'
+                                          : 'Optional note...'
+                                      }
+                                      value={r.comment}
+                                      onChange={(e) =>
+                                        setRecords({
+                                          ...records,
+                                          [s.id]: { ...r, comment: e.target.value },
+                                        })
+                                      }
+                                      style={{
+                                        borderColor:
+                                          (r.performance === 'NEEDS_IMPROVEMENT' || r.conduct === 'NEEDS_IMPROVEMENT') && !r.comment.trim()
+                                            ? '#c67a53'
+                                            : undefined,
+                                      }}
+                                    />
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -1548,27 +1682,34 @@ export default function Home() {
                           <th>Student</th>
                           <th>Attendance</th>
                           <th>Performance</th>
+                          <th>Conduct</th>
+                          <th>Punctuality</th>
                           <th>Participation</th>
                           <th>Homework</th>
-                          <th>Conduct</th>
                           <th>Teacher Comments</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {reviewDetail.records.map((r: any) => (
-                          <tr key={r.id}>
+                        {reviewDetail.records.map((r: any) => {
+                          const absent = r.attendanceStatus === 'ABSENT';
+                          const cell = (v: string | null | undefined) =>
+                            absent ? NOT_APPLICABLE : v ? pretty(v) : '—';
+                          return (
+                          <tr key={r.id} style={absent ? { background: '#fef2f2' } : undefined}>
                             <td>
                               <strong>{r.studentNameSnapshot}</strong>
                               <div style={{ fontSize: 11, color: '#748792' }}>{r.studentCodeSnapshot}</div>
                             </td>
                             <td><Badge status={r.attendanceStatus} /></td>
-                            <td>{r.performance ? pretty(r.performance) : '—'}</td>
-                            <td>{r.participation || '—'}</td>
-                            <td>{r.homework ? pretty(r.homework) : '—'}</td>
-                            <td>{r.conduct ? pretty(r.conduct) : '—'}</td>
-                            <td style={{ fontSize: 12 }}>{r.comment || '—'}</td>
+                            <td>{cell(r.performance)}</td>
+                            <td>{cell(r.conduct)}</td>
+                            <td>{cell(r.punctuality)}</td>
+                            <td>{cell(r.participation)}</td>
+                            <td>{cell(r.homework)}</td>
+                            <td style={{ fontSize: 12 }}>{absent ? NOT_APPLICABLE : r.comment || '—'}</td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -1624,7 +1765,7 @@ export default function Home() {
                 <div className="list-toolbar">
                   <div>
                     <h2>{user.role === 'ADMIN' ? 'All Daily Lesson Reports' : 'My Lesson Reports History'}</h2>
-                    <p>Filter by cohort, subject area, approval status, and month</p>
+                    <p>Filter by cohort, subject area, approval status, and any date range</p>
                   </div>
                   <button className="btn outline" onClick={() => refresh()}>
                     <RefreshCw size={14} /> Refresh
@@ -1662,14 +1803,15 @@ export default function Home() {
                       <option value="RETURNED">Returned</option>
                     </select>
                   </label>
-                  <label>
-                    Month
-                    <input
-                      type="month"
-                      value={reportFilterMonth}
-                      onChange={(e) => setReportFilterMonth(e.target.value)}
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <PeriodPicker
+                      from={reportFilterPeriod.from}
+                      to={reportFilterPeriod.to}
+                      today={ref?.today || overview?.today || ''}
+                      onChange={setReportFilterPeriod}
+                      label="Lesson date range"
                     />
-                  </label>
+                  </div>
                 </div>
 
                 {reports.length === 0 ? (
@@ -1860,14 +2002,14 @@ export default function Home() {
               <div className="panel form-panel" style={{ marginBottom: 20 }}>
                 <div className="list-toolbar">
                   <div>
-                    <div className="eyebrow">DETERMINISTIC MONTHLY ENGINE</div>
-                    <h2>Monthly Academic & Behavioural Reports</h2>
-                    <p>Aggregate evaluations across all approved lessons within the target reporting period.</p>
+                    <div className="eyebrow">DETERMINISTIC PERIOD ENGINE</div>
+                    <h2>Academic &amp; Behavioural Reports</h2>
+                    <p>Aggregate evaluations across all approved lessons within any date range, then compare two or more months side by side.</p>
                   </div>
                   <button
                     className="btn primary"
                     onClick={getMonthly}
-                    disabled={busy || !monthlyMonth || (user.role === 'TEACHER' && (!monthlyClass || !monthlySubject))}
+                    disabled={busy || !resolve(monthlyPeriod) || (user.role === 'TEACHER' && (!monthlyClass || !monthlySubject))}
                   >
                     Generate Report <ChevronRight size={16} />
                   </button>
@@ -1875,14 +2017,16 @@ export default function Home() {
 
                 {/* Filter Controls */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-                  <label>
-                    Reporting Month
-                    <input
-                      type="month"
-                      value={monthlyMonth}
-                      onChange={(e) => setMonthlyMonth(e.target.value)}
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <PeriodPicker
+                      from={monthlyPeriod.from}
+                      to={monthlyPeriod.to}
+                      today={ref?.today || overview?.today || ''}
+                      onChange={setMonthlyPeriod}
+                      months={monthly?.period.months}
+                      closedMonths={monthly?.closedMonths}
                     />
-                  </label>
+                  </div>
                   <label>
                     Class
                     <select
@@ -1942,13 +2086,19 @@ export default function Home() {
                 <div className="panel">
                   <div className="list-toolbar">
                     <div>
-                      <div className="eyebrow">{monthly.organization.toUpperCase()} · {monthly.month}</div>
-                      <h2>Class Monthly Follow-Up Summary</h2>
-                      <p>{monthly.summaries.length} student-subject summaries calculated strictly from recorded lessons</p>
+                      <div className="eyebrow">{monthly.organization.toUpperCase()} · {periodText(monthly.period)}</div>
+                      <h2>Class Follow-Up Summary</h2>
+                      <p>
+                        {monthly.summaries.length} student-subject summaries over {monthly.period.months.length} month{monthly.period.months.length === 1 ? '' : 's'}, calculated strictly from recorded lessons
+                        {monthly.closedMonths.length > 0 && ` · ${monthly.closedMonths.length} closed month${monthly.closedMonths.length === 1 ? '' : 's'} included at current rule version`}
+                      </p>
                     </div>
                     {/* EXPORT BUTTONS (§57, §105) */}
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <button className="btn outline" onClick={() => window.print()}>
+                      <button className="btn outline" onClick={() => downloadClassSummaryPdf({
+                        school: monthly.organization, period: monthly.period, closedMonths: monthly.closedMonths,
+                        summaries: monthly.summaries, comparison: monthly.comparison, rules: monthly.rules,
+                      })}>
                         <Printer size={15} /> Print / PDF
                       </button>
                       <button className="btn outline" onClick={exportMonthlyCsv}>
@@ -2044,9 +2194,11 @@ export default function Home() {
                   {/* Individual Student In-Depth Perspective Component */}
                   <div style={{ marginTop: 24 }}>
                     <MonthlyOverview
-                      month={monthly.month}
+                      period={monthly.period}
+                      closedMonths={monthly.closedMonths}
                       school={monthly.organization}
                       summaries={monthly.summaries}
+                      comparison={monthly.comparison}
                       data={monthly.raw}
                       rules={monthly.rules}
                     />
@@ -2060,7 +2212,8 @@ export default function Home() {
           {page === 'statistics' && user.role !== 'SUPER_ADMIN' && monthly && (
             <StatisticsView
               school={monthly.organization}
-              month={monthly.month}
+              period={periodText(monthly.period)}
+              fileTag={periodSlug(monthly.period)}
               summaries={monthly.summaries}
               rawObservations={monthly.raw}
             />
@@ -2083,7 +2236,7 @@ export default function Home() {
           {page === 'quality' && user.role === 'ADMIN' && (
             <DataQualityView
               api={api}
-              currentMonth={overview?.today?.slice(0, 7) || '2026-09'}
+              today={ref?.today || overview?.today || ''}
               onOpenReport={openLesson}
             />
           )}
@@ -2181,10 +2334,10 @@ export default function Home() {
                             {item.orderIndex !== undefined && <span>Order: {item.orderIndex}</span>}
                             {item.department && <span>Dept: {item.department}</span>}
                             {item.gradeId && (
-                              <span>Grade: {ref.grades.find((g) => g.id === item.gradeId)?.name || '—'}</span>
+                              <span>Grade: {ref?.grades?.find((g) => g.id === item.gradeId)?.name || '—'}</span>
                             )}
                             {item.classId && (
-                              <span>Class: {ref.classes.find((c) => c.id === item.classId)?.name || '—'} · Subject: {ref.subjects.find((s) => s.id === item.subjectId)?.name || '—'}</span>
+                              <span>Class: {ref?.classes?.find((c) => c.id === item.classId)?.name || '—'} · Subject: {ref?.subjects?.find((s) => s.id === item.subjectId)?.name || '—'}</span>
                             )}
                           </td>
                           <td>
@@ -2581,14 +2734,20 @@ export default function Home() {
                     School Timezone
                     <input
                       type="text"
-                      value={config.settings.timezone}
+                      list="timezone-options"
+                      value={config.organization.timezone || ''}
                       onChange={(e) =>
                         setConfig({
                           ...config,
-                          settings: { ...config.settings, timezone: e.target.value },
+                          organization: { ...config.organization, timezone: e.target.value },
                         })
                       }
                     />
+                    <datalist id="timezone-options">
+                      {TIMEZONE_OPTIONS.map((tz) => (
+                        <option key={tz} value={tz} />
+                      ))}
+                    </datalist>
                   </label>
                   <label>
                     {'Excellent Threshold (avg >=)'}
@@ -2654,7 +2813,7 @@ export default function Home() {
                         await post('settings', {
                           name: config.organization.name,
                           logoUrl: config.organization.logoUrl,
-                          timezone: config.settings.timezone,
+                          timezone: config.organization.timezone,
                           excellentThreshold: config.settings.excellentThreshold,
                           goodThreshold: config.settings.goodThreshold,
                           homeworkUsuallyThreshold: config.settings.homeworkUsuallyThreshold,
@@ -2738,6 +2897,65 @@ export default function Home() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </div>
+
+              {/* Report Date Policy */}
+              <div className="panel form-panel">
+                <h3>Report Date Policy (§39)</h3>
+                <p style={{ fontSize: 13, color: '#748792' }}>
+                  Set how many days back a report may be dated. Teachers can create new reports
+                  within this window, and you can correct existing reports to any date inside it.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+                  <label>
+                    Report Date Window (days)
+                    <input
+                      type="number"
+                      min={1}
+                      max={365}
+                      value={config.settings.adminDateOverrideDays ?? 14}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          settings: { ...config.settings, adminDateOverrideDays: Number(e.target.value) },
+                        })
+                      }
+                    />
+                    <small style={{ color: '#748792', fontSize: 11, fontWeight: 600 }}>
+                      Reports are accepted from {ref?.minDate || '—'} to {ref?.today || '—'}. Default is 14 days.
+                    </small>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={config.settings.adminCanOverrideFuture !== false}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          settings: { ...config.settings, adminCanOverrideFuture: e.target.checked },
+                        })
+                      }
+                    />
+                    <span style={{ fontSize: 13, fontWeight: 500 }}>Allow reports dated in the future</span>
+                  </label>
+                  <button
+                    className="btn primary"
+                    disabled={busy}
+                    onClick={() => {
+                      run(async () => {
+                        await post('adminSettings', {
+                          adminDateOverrideDays: Number(config.settings.adminDateOverrideDays ?? 14),
+                          adminCanOverrideFuture: config.settings.adminCanOverrideFuture !== false,
+                        });
+                        setNotice('Report date policy updated.');
+                        setConfig(await api('settings'));
+                        await refresh();
+                      });
+                    }}
+                  >
+                    Save Report Date Policy
+                  </button>
                 </div>
               </div>
             </div>

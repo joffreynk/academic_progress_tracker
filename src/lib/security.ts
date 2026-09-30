@@ -2,7 +2,12 @@ import { cookies, headers } from 'next/headers';
 import { createHash, randomBytes } from 'crypto';
 import { and, eq, gt } from 'drizzle-orm';
 import { db } from '@/db';
-import { sessions, users, organizations, teachers, auditLogs } from '@/db/schema';
+import { sessions, users, organizations, teachers, auditLogs, settings } from '@/db/schema';
+
+export const DEFAULT_REPORT_WINDOW_DAYS = 14;
+export const MIN_REPORT_WINDOW_DAYS = 1;
+export const MAX_REPORT_WINDOW_DAYS = 365;
+export const reportWindowLabel = (days: number) => `${days} day${days === 1 ? '' : 's'}`;
 
 export class AppError extends Error { constructor(message: string, public status = 400) { super(message); } }
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -50,7 +55,9 @@ export async function checkOrigin(request: Request) {
 }
 export function schoolToday(timezone: string) { return new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()); }
 export function dateMinus(date: string, days: number) { const d = new Date(`${date}T12:00:00Z`); d.setUTCDate(d.getUTCDate()-days); return d.toISOString().slice(0,10); }
-export function validLessonDate(date: string, today: string) { return /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(`${date}T12:00:00Z`)) && new Date(`${date}T12:00:00Z`).toISOString().slice(0,10)===date && date>=dateMinus(today,14) && date<=today; }
+export function validLessonDate(date: string, today: string, windowDays = DEFAULT_REPORT_WINDOW_DAYS) { return /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(`${date}T12:00:00Z`)) && new Date(`${date}T12:00:00Z`).toISOString().slice(0,10)===date && date>=dateMinus(today,windowDays) && date<=today; }
+export async function reportWindowDays(organizationId: string) { const [row]=await db.select({days:settings.adminDateOverrideDays}).from(settings).where(eq(settings.organizationId,organizationId)).limit(1); const days=row?.days??DEFAULT_REPORT_WINDOW_DAYS; return days>=MIN_REPORT_WINDOW_DAYS&&days<=MAX_REPORT_WINDOW_DAYS?days:DEFAULT_REPORT_WINDOW_DAYS; }
+export async function reportDatePolicy(organizationId: string) { const [row]=await db.select({days:settings.adminDateOverrideDays,allowFuture:settings.adminCanOverrideFuture}).from(settings).where(eq(settings.organizationId,organizationId)).limit(1); const days=row?.days??DEFAULT_REPORT_WINDOW_DAYS; return {days:days>=MIN_REPORT_WINDOW_DAYS&&days<=MAX_REPORT_WINDOW_DAYS?days:DEFAULT_REPORT_WINDOW_DAYS,allowFuture:row?.allowFuture??true}; }
 export async function orgFor(user: typeof users.$inferSelect, targetOrgId?: string | null) {
   const orgId = (user.role === 'SUPER_ADMIN' && targetOrgId) ? targetOrgId : user.organizationId;
   if (!orgId) throw new AppError('Organization context required.',403);

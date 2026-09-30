@@ -2,9 +2,31 @@ import 'dotenv/config';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validLessonDate, dateMinus } from '../src/lib/security';
-import { summarize, groupReports, calculateStudentTrends, buildNormalRecordDefaults, buildReportActivitySeries, type Observation } from '../src/lib/reporting';
+import { summarize, groupReports, groupReportsByMonth, summarizeByMonth, resultTrend, calculateStudentTrends, buildNormalRecordDefaults, buildReportActivitySeries, type Observation } from '../src/lib/reporting';
 import { reviewTransition } from '../src/lib/review';
 import { normalizeTeacherAssignmentImportRow } from '../src/lib/importing';
+import {
+  buildPeriod,
+  dayBefore,
+  daysInPeriod,
+  formatDate,
+  isDateKey,
+  isMonthKey,
+  monthEnd,
+  monthEndExclusive,
+  monthKey,
+  monthLabel,
+  monthSpan,
+  monthStart,
+  monthsBetween,
+  periodLabel,
+  periodPresets,
+  periodSlug,
+  resolvePeriod,
+  shiftMonth,
+  thisMonthPeriod,
+  MAX_PERIOD_MONTHS,
+} from '../src/lib/period';
 
 test('§import: teacher roster row with NO, NAME, SURNAME, EMAIL, SUBJECTS and CLASSES is normalized correctly', () => {
   const row = {
@@ -73,15 +95,16 @@ test('§161: Absent student observations do not calculate academic scores and co
     attendance: 'PRESENT',
     performance: 'GOOD',
     participation: 'ACTIVE',
-    homework: 'COMPLETED',
+    homework: 'ALWAYS_COMPLETED',
     conduct: 'GOOD',
+    punctuality: 'ALWAYS_ON_TIME',
     comment: null,
   };
 
   const rows: Observation[] = [
     base,
-    { ...base, lessonId: 'l2', attendance: 'LATE', performance: 'EXCELLENT', participation: 'ACTIVE', homework: 'COMPLETED', conduct: 'EXCELLENT' },
-    { ...base, lessonId: 'l3', attendance: 'ABSENT', performance: null, participation: null, homework: null, conduct: null },
+    { ...base, lessonId: 'l2', attendance: 'LATE', performance: 'EXCELLENT', participation: 'ACTIVE', homework: 'ALWAYS_COMPLETED', conduct: 'EXCELLENT' },
+    { ...base, lessonId: 'l3', attendance: 'ABSENT', performance: null, participation: null, homework: null, conduct: null, punctuality: null },
   ];
 
   const result = summarize(rows, undefined);
@@ -111,22 +134,23 @@ test('§162: Late attendance counts as attended lesson and contributes to punctu
     subjectName: 'English',
     attendance: 'PRESENT',
     performance: 'GOOD',
-    participation: 'ACTIVE',
-    homework: 'COMPLETED',
     conduct: 'GOOD',
+    punctuality: 'ALWAYS_ON_TIME',
+    participation: 'ACTIVE',
+    homework: 'ALWAYS_COMPLETED',
     comment: null,
   };
 
-  // 10 attended lessons, 0 late -> Always On Time
+  // 10 attended lessons, all rated on time -> Always On Time
   const onTimeRows = Array.from({ length: 10 }, (_, i) => ({ ...base, lessonId: String(i) }));
   assert.equal(summarize(onTimeRows, undefined).punctualityResult, 'Always On Time');
 
-  // 10 attended lessons, 1 late (10%) -> Occasionally Late (<= 10% threshold)
-  const occasionallyLateRows = [...onTimeRows.slice(0, 9), { ...base, lessonId: '9', attendance: 'LATE' }];
+  // 10 attended lessons, 1 rated occasionally late (10%) -> Occasionally Late (<= 10% threshold)
+  const occasionallyLateRows = [...onTimeRows.slice(0, 9), { ...base, lessonId: '9', attendance: 'LATE', punctuality: 'OCCASIONALLY_LATE' }];
   assert.equal(summarize(occasionallyLateRows, undefined).punctualityResult, 'Occasionally Late');
 
-  // 10 attended lessons, 2 late (20%) -> Frequently Late (> 10% threshold)
-  const frequentlyLateRows = [...onTimeRows.slice(0, 8), { ...base, lessonId: '8', attendance: 'LATE' }, { ...base, lessonId: '9', attendance: 'LATE' }];
+  // 10 attended lessons, 2 rated late (20%) -> Frequently Late (> 10% threshold)
+  const frequentlyLateRows = [...onTimeRows.slice(0, 8), { ...base, lessonId: '8', attendance: 'LATE', punctuality: 'OCCASIONALLY_LATE' }, { ...base, lessonId: '9', attendance: 'LATE', punctuality: 'FREQUENTLY_LATE' }];
   assert.equal(summarize(frequentlyLateRows, undefined).punctualityResult, 'Frequently Late');
 });
 
@@ -149,8 +173,9 @@ test('§163: Monthly scoring retains observation counts and classifies according
     attendance: 'PRESENT',
     performance: i < 2 ? 'EXCELLENT' : i < 13 ? 'GOOD' : 'NEEDS_IMPROVEMENT',
     participation: 'ACTIVE',
-    homework: i < 15 ? 'COMPLETED' : 'NOT_COMPLETED',
+    homework: i < 15 ? 'ALWAYS_COMPLETED' : 'RARELY_COMPLETED',
     conduct: 'GOOD',
+    punctuality: 'ALWAYS_ON_TIME',
     comment: null,
   }));
 
@@ -180,8 +205,9 @@ test('§164: Delayed report entry is classified under lessonDate month, not entr
     attendance: 'PRESENT',
     performance: 'EXCELLENT',
     participation: 'ACTIVE',
-    homework: 'COMPLETED',
+    homework: 'ALWAYS_COMPLETED',
     conduct: 'EXCELLENT',
+    punctuality: 'ALWAYS_ON_TIME',
     comment: null,
   };
 
@@ -198,18 +224,19 @@ test('§27: default normal record sets teacher baseline to good and active value
   assert.deepEqual(defaults, {
     attendance: 'PRESENT',
     performance: 'GOOD',
-    participation: 'ACTIVE',
-    homework: 'COMPLETED',
     conduct: 'GOOD',
+    punctuality: 'ALWAYS_ON_TIME',
+    participation: 'ACTIVE',
+    homework: 'ALWAYS_COMPLETED',
     comment: '',
   });
 });
 
 test('§146: report activity series aggregates lesson submission and review counts by date', () => {
   const rows: Observation[] = [
-    { lessonId: 'l1', lessonDate: '2026-09-01', topic: 'Algebra', status: 'SUBMITTED', studentId: 's1', studentName: 'A', studentCode: 'S1', className: '7A', subjectName: 'Math', attendance: 'PRESENT', performance: 'GOOD', participation: 'ACTIVE', homework: 'COMPLETED', conduct: 'GOOD', comment: null },
-    { lessonId: 'l2', lessonDate: '2026-09-01', topic: 'Geometry', status: 'APPROVED', studentId: 's2', studentName: 'B', studentCode: 'S2', className: '7A', subjectName: 'Math', attendance: 'LATE', performance: 'GOOD', participation: 'ACTIVE', homework: 'COMPLETED', conduct: 'GOOD', comment: null },
-    { lessonId: 'l3', lessonDate: '2026-09-02', topic: 'Science', status: 'RETURNED', studentId: 's3', studentName: 'C', studentCode: 'S3', className: '7B', subjectName: 'Science', attendance: 'ABSENT', performance: null, participation: null, homework: null, conduct: null, comment: null },
+    { lessonId: 'l1', lessonDate: '2026-09-01', topic: 'Algebra', status: 'SUBMITTED', studentId: 's1', studentName: 'A', studentCode: 'S1', className: '7A', subjectName: 'Math', attendance: 'PRESENT', performance: 'GOOD', participation: 'ACTIVE', homework: 'ALWAYS_COMPLETED', conduct: 'GOOD', punctuality: 'ALWAYS_ON_TIME', comment: null },
+    { lessonId: 'l2', lessonDate: '2026-09-01', topic: 'Geometry', status: 'APPROVED', studentId: 's2', studentName: 'B', studentCode: 'S2', className: '7A', subjectName: 'Math', attendance: 'LATE', performance: 'GOOD', participation: 'ACTIVE', homework: 'ALWAYS_COMPLETED', conduct: 'GOOD', punctuality: 'OCCASIONALLY_LATE', comment: null },
+    { lessonId: 'l3', lessonDate: '2026-09-02', topic: 'Science', status: 'RETURNED', studentId: 's3', studentName: 'C', studentCode: 'S3', className: '7B', subjectName: 'Science', attendance: 'ABSENT', performance: null, participation: null, homework: null, conduct: null, punctuality: null, comment: null },
   ];
 
   assert.deepEqual(buildReportActivitySeries(rows), [
@@ -248,8 +275,9 @@ test('§153: Normal distribution of grades calculates across multiple students c
     attendance: 'PRESENT',
     performance: 'GOOD',
     participation: 'ACTIVE',
-    homework: 'COMPLETED',
+    homework: 'ALWAYS_COMPLETED',
     conduct: 'GOOD',
+    punctuality: 'ALWAYS_ON_TIME',
     comment: null,
   });
 
@@ -294,8 +322,9 @@ test('§155: Month with exactly one lesson aggregates without division by zero o
     attendance: 'PRESENT',
     performance: 'EXCELLENT',
     participation: 'ACTIVE',
-    homework: 'COMPLETED',
+    homework: 'ALWAYS_COMPLETED',
     conduct: 'EXCELLENT',
+    punctuality: 'ALWAYS_ON_TIME',
     comment: null,
   };
 
@@ -314,6 +343,7 @@ test('§155: Month with exactly one lesson aggregates without division by zero o
     participation: null,
     homework: null,
     conduct: null,
+    punctuality: null,
   };
   const absentSummary = summarize([singleAbsent], undefined);
   assert.equal(absentSummary.lessons, 1);
@@ -338,8 +368,9 @@ test('§156: Only active student roster observations are grouped, excluding inac
     attendance: 'PRESENT',
     performance: 'GOOD',
     participation: 'ACTIVE',
-    homework: 'COMPLETED',
+    homework: 'ALWAYS_COMPLETED',
     conduct: 'GOOD',
+    punctuality: 'ALWAYS_ON_TIME',
     comment: null,
   };
 
@@ -366,8 +397,9 @@ test('§157: Exact threshold values (2.65, 1.65, 80%, 10%) resolve strictly as d
       attendance: 'PRESENT',
       performance: 'EXCELLENT',
       participation: 'ACTIVE',
-      homework: 'COMPLETED',
+      homework: 'ALWAYS_COMPLETED',
       conduct: 'GOOD',
+      punctuality: 'ALWAYS_ON_TIME',
       comment: null,
     })),
     ...Array.from({ length: 7 }, (_, i) => ({
@@ -383,8 +415,9 @@ test('§157: Exact threshold values (2.65, 1.65, 80%, 10%) resolve strictly as d
       attendance: 'PRESENT',
       performance: 'GOOD',
       participation: 'ACTIVE',
-      homework: 'COMPLETED',
+      homework: 'ALWAYS_COMPLETED',
       conduct: 'GOOD',
+      punctuality: 'ALWAYS_ON_TIME',
       comment: null,
     })),
   ];
@@ -414,29 +447,29 @@ test('§157: Exact threshold values (2.65, 1.65, 80%, 10%) resolve strictly as d
 
   // 3. Homework 80% boundary: 8 completed, 2 not completed = 80% -> Usually Completed
   const hw80: Observation[] = [
-    ...Array.from({ length: 8 }, (_, i) => ({ ...boundary265[0], lessonId: `hw-${i}`, homework: 'COMPLETED' })),
-    ...Array.from({ length: 2 }, (_, i) => ({ ...boundary265[0], lessonId: `hw-nc-${i}`, homework: 'NOT_COMPLETED' })),
+    ...Array.from({ length: 8 }, (_, i) => ({ ...boundary265[0], lessonId: `hw-${i}`, homework: 'ALWAYS_COMPLETED' })),
+    ...Array.from({ length: 2 }, (_, i) => ({ ...boundary265[0], lessonId: `hw-nc-${i}`, homework: 'RARELY_COMPLETED' })),
   ];
   assert.equal(summarize(hw80, undefined).homeworkResult, 'Usually Completed');
 
   // Below 80%: 79 completed, 21 not completed = 79% -> Rarely Completed
   const hw79: Observation[] = [
-    ...Array.from({ length: 79 }, (_, i) => ({ ...boundary265[0], lessonId: `hw79-${i}`, homework: 'COMPLETED' })),
-    ...Array.from({ length: 21 }, (_, i) => ({ ...boundary265[0], lessonId: `hw79-nc-${i}`, homework: 'NOT_COMPLETED' })),
+    ...Array.from({ length: 79 }, (_, i) => ({ ...boundary265[0], lessonId: `hw79-${i}`, homework: 'ALWAYS_COMPLETED' })),
+    ...Array.from({ length: 21 }, (_, i) => ({ ...boundary265[0], lessonId: `hw79-nc-${i}`, homework: 'RARELY_COMPLETED' })),
   ];
   assert.equal(summarize(hw79, undefined).homeworkResult, 'Rarely Completed');
 
-  // 4. Punctuality 10% boundary: 1 late out of 10 attended (10%) -> Occasionally Late
+  // 4. Punctuality 10% boundary: 1 rated occasionally late out of 10 attended (10%) -> Occasionally Late
   const late10: Observation[] = [
-    ...Array.from({ length: 9 }, (_, i) => ({ ...boundary265[0], lessonId: `pt-${i}`, attendance: 'PRESENT' })),
-    { ...boundary265[0], lessonId: 'pt-late', attendance: 'LATE' },
+    ...Array.from({ length: 9 }, (_, i) => ({ ...boundary265[0], lessonId: `pt-${i}`, attendance: 'PRESENT', punctuality: 'ALWAYS_ON_TIME' })),
+    { ...boundary265[0], lessonId: 'pt-late', attendance: 'LATE', punctuality: 'OCCASIONALLY_LATE' },
   ];
   assert.equal(summarize(late10, undefined).punctualityResult, 'Occasionally Late');
 
-  // Above 10%: 11 late out of 100 attended (11%) -> Frequently Late
+  // Above 10%: 11 rated late out of 100 attended (11%) -> Frequently Late
   const late11: Observation[] = [
-    ...Array.from({ length: 89 }, (_, i) => ({ ...boundary265[0], lessonId: `pt11-${i}`, attendance: 'PRESENT' })),
-    ...Array.from({ length: 11 }, (_, i) => ({ ...boundary265[0], lessonId: `pt11-late-${i}`, attendance: 'LATE' })),
+    ...Array.from({ length: 89 }, (_, i) => ({ ...boundary265[0], lessonId: `pt11-${i}`, attendance: 'PRESENT', punctuality: 'ALWAYS_ON_TIME' })),
+    ...Array.from({ length: 11 }, (_, i) => ({ ...boundary265[0], lessonId: `pt11-late-${i}`, attendance: 'LATE', punctuality: 'FREQUENTLY_LATE' })),
   ];
   assert.equal(summarize(late11, undefined).punctualityResult, 'Frequently Late');
 });
@@ -469,8 +502,9 @@ test('§167 & §109: Student trend analysis segments observations cleanly across
     attendance: 'PRESENT',
     performance: 'GOOD',
     participation: 'ACTIVE',
-    homework: 'COMPLETED',
+    homework: 'ALWAYS_COMPLETED',
     conduct: 'GOOD',
+    punctuality: 'ALWAYS_ON_TIME',
     comment: null,
   };
 
@@ -494,6 +528,188 @@ test('§167 & §109: Student trend analysis segments observations cleanly across
   assert.equal(trends[1].lessons, 2);
 });
 
+// ── Reporting period ranges (arbitrary start/end dates, not just whole months) ──
+test('period: month helpers anchor on UTC noon and handle leap years and year boundaries', () => {
+  assert.equal(monthEnd('2026-02'), '2026-02-28');
+  assert.equal(monthEnd('2024-02'), '2024-02-29');
+  assert.equal(monthEnd('2026-12'), '2026-12-31');
+  assert.equal(monthEnd('2026-09'), '2026-09-30');
+  assert.equal(shiftMonth('2026-01', -1), '2025-12');
+  assert.equal(shiftMonth('2026-12', 1), '2027-01');
+  assert.equal(monthKey('2026-09-15'), '2026-09');
+});
+
+test('period: a range may start and end mid-month and still enumerate every covered month', () => {
+  const period = buildPeriod('2026-08-15', '2026-10-04');
+  assert.ok(period, 'mid-month range is valid');
+  assert.deepEqual(period!.months, ['2026-08', '2026-09', '2026-10']);
+  assert.equal(period!.from, '2026-08-15');
+  assert.equal(period!.to, '2026-10-04');
+  assert.equal(daysInPeriod(period!), 51);
+  assert.equal(periodLabel(period!), '15 Aug 2026 – 4 Oct 2026');
+  assert.equal(periodSlug(period!), '2026-08-15_2026-10-04');
+});
+
+test('period: a single calendar month collapses to a month-name label', () => {
+  const period = buildPeriod('2026-09-01', '2026-09-30');
+  assert.equal(periodLabel(period!), 'September 2026');
+  assert.equal(monthLabel('2026-09'), 'September 2026');
+  assert.equal(formatDate('2026-09-01'), '1 Sep 2026');
+});
+
+test('period: reversed, malformed and impossible dates are rejected', () => {
+  assert.equal(buildPeriod('2026-10-01', '2026-09-30'), null, 'start after end is rejected');
+  assert.equal(buildPeriod('2026-13-01', '2026-13-31'), null, 'month 13 does not exist');
+  assert.equal(buildPeriod('2026-02-30', '2026-03-05'), null, '30 February does not exist');
+  assert.equal(buildPeriod('15-09-2026', '2026-09-30'), null, 'non-ISO format is rejected');
+  assert.equal(isDateKey('2026-02-30'), false);
+  assert.equal(isDateKey('2024-02-29'), true);
+  assert.equal(isMonthKey('2026-00'), false);
+  assert.equal(isMonthKey('2026-09'), true);
+});
+
+test('period: spans beyond the maximum month budget are rejected', () => {
+  assert.equal(buildPeriod('2020-01-01', '2020-12-31')!.months.length, 12);
+  assert.equal(monthSpan('2026-01-01', '2026-12-31'), 12);
+  assert.equal(monthSpan('2026-08-15', '2026-10-04'), 3, 'a mid-month start still counts its own month');
+  assert.equal(buildPeriod('2026-01-01', '2026-12-31')!.months.length, 12, 'a full calendar year is still within the cap');
+  const tooWide = buildPeriod('1990-01-01', '2026-01-01');
+  assert.equal(tooWide, null, `${monthSpan('1990-01-01', '2026-01-01')} months exceeds the ${MAX_PERIOD_MONTHS}-month cap`);
+  assert.equal(buildPeriod(`2000-01-01`, '2026-01-01'), null, 'a 26-year span is rejected');
+  assert.ok(monthsBetween('1990-01-01', '2026-01-01').length <= MAX_PERIOD_MONTHS, 'the enumerated list stays bounded');
+});
+
+test('period: malformed input never throws out of the date helpers', () => {
+  assert.equal(monthKey('2026-13-01'), '');
+  assert.equal(monthStart('2026-13'), '');
+  assert.equal(monthEnd('2026-13'), '');
+  assert.equal(monthEndExclusive('nonsense'), '');
+  assert.equal(shiftMonth('nonsense', 1), '');
+  assert.equal(dayBefore('2026-02-30'), '');
+  assert.equal(monthSpan('2026-13-01', '2026-12-31'), 0);
+  assert.equal(monthSpan('2026-12-31', '2026-01-01'), 0, 'reversed range counts nothing');
+  assert.deepEqual(monthsBetween('2026-13-01', '2026-12-31'), []);
+  assert.equal(formatDate('2026-02-30'), '2026-02-30', 'an unparseable date is echoed back unchanged');
+  assert.equal(monthLabel('2026-13'), '2026-13');
+});
+
+test('period: resolvePeriod honours from/to, falls back to a legacy month, then to the current school month', () => {
+  const today = '2026-09-28';
+  const explicit = resolvePeriod(new URLSearchParams('from=2026-07-10&to=2026-09-28'), today);
+  assert.deepEqual(explicit.months, ['2026-07', '2026-08', '2026-09']);
+
+  const legacy = resolvePeriod(new URLSearchParams('month=2026-02'), today);
+  assert.equal(legacy.from, '2026-02-01');
+  assert.equal(legacy.to, '2026-02-28', 'legacy month expands to the whole month');
+
+  const fallback = resolvePeriod(new URLSearchParams(''), today);
+  assert.equal(fallback.from, '2026-09-01');
+  assert.equal(fallback.to, '2026-09-30', 'falls back to the whole current month');
+
+  // Only one bound supplied: the other falls back to the current month edge, order is then validated.
+  assert.throws(() => resolvePeriod(new URLSearchParams('from=2026-10-01'), today));
+});
+
+test('period: presets always resolve to valid ranges and stay inside the cap', () => {
+  const today = '2026-09-28';
+  const presets = periodPresets(today);
+  assert.deepEqual(presets.map((p) => p.id), ['this-month', 'last-month', 'last-3-months', 'last-6-months', 'year-to-date']);
+  presets.forEach((preset) => {
+    const period = buildPeriod(preset.from, preset.to);
+    assert.ok(period, `${preset.id} is a valid period`);
+    assert.ok(period!.from <= period!.to, `${preset.id} start is not after end`);
+    assert.ok(period!.months.length <= MAX_PERIOD_MONTHS, `${preset.id} stays within the month cap`);
+  });
+  const byId = Object.fromEntries(presets.map((p) => [p.id, p]));
+  assert.equal(byId['this-month'].to, '2026-09-30');
+  assert.deepEqual(monthsBetween(byId['last-3-months'].from, byId['last-3-months'].to), ['2026-07', '2026-08', '2026-09']);
+  assert.equal(byId['year-to-date'].to, '2026-09-28', 'year to date ends today, not at month end');
+  assert.equal(thisMonthPeriod(today).from, '2026-09-01');
+});
+
+// ── Multi-month comparison (§167 & §109 applied to a single student per subject) ──
+const comparisonBase: Observation = {
+  lessonId: 'c-1',
+  lessonDate: '2026-08-10',
+  topic: 'Fractions',
+  status: 'APPROVED',
+  studentId: 'student-compare',
+  studentName: 'Compare Kid',
+  studentCode: 'CK-01',
+  className: '9B',
+  subjectName: 'Mathematics',
+  attendance: 'PRESENT',
+  performance: 'NEEDS_IMPROVEMENT',
+  conduct: 'NEEDS_IMPROVEMENT',
+  punctuality: 'FREQUENTLY_LATE',
+  homework: 'RARELY_COMPLETED',
+  participation: 'PASSIVE',
+  comment: null,
+};
+
+test('comparison: one subject row per month with criteria status, attendance and lesson counts', () => {
+  const rows: Observation[] = [
+    { ...comparisonBase, lessonId: 'aug-1', lessonDate: '2026-08-05' },
+    { ...comparisonBase, lessonId: 'aug-2', lessonDate: '2026-08-20' },
+    { ...comparisonBase, lessonId: 'sep-1', lessonDate: '2026-09-02', performance: 'GOOD', conduct: 'GOOD', punctuality: 'OCCASIONALLY_LATE', homework: 'USUALLY_COMPLETED', participation: 'MODERATE' },
+    { ...comparisonBase, lessonId: 'oct-1', lessonDate: '2026-10-01', attendance: 'ABSENT', performance: 'EXCELLENT', conduct: 'EXCELLENT', punctuality: 'ALWAYS_ON_TIME', homework: 'ALWAYS_COMPLETED', participation: 'ACTIVE' },
+  ];
+
+  const comparison = groupReportsByMonth(rows, undefined);
+  assert.equal(comparison.length, 1, 'one comparison row per student and subject');
+
+  const maths = comparison[0];
+  assert.equal(maths.subjectName, 'Mathematics');
+  assert.deepEqual(maths.months.map((m) => m.month), ['2026-08', '2026-09', '2026-10'], 'months are ordered oldest to newest');
+  assert.deepEqual(maths.months.map((m) => m.lessons), [2, 1, 1]);
+  assert.deepEqual(maths.months.map((m) => m.performanceResult), ['NEEDS_IMPROVEMENT', 'GOOD', 'EXCELLENT']);
+  assert.deepEqual(maths.months.map((m) => m.participationResult), ['PASSIVE', 'MODERATE', 'ACTIVE']);
+  assert.deepEqual(maths.months.map((m) => m.attendanceRate), [100, 100, 0]);
+  assert.deepEqual(maths.months.map((m) => m.punctualityResult), ['Frequently Late', 'Frequently Late', 'Always On Time'], 'a single late lesson in September is still 100% late, so it is frequently late');
+  assert.deepEqual(maths.months.map((m) => m.homeworkResult), ['Rarely Completed', 'Always Completed', 'Always Completed'], 'one USUALLY_COMPLETED lesson is a 100% completion rate, so it resolves to Always Completed');
+  assert.equal(maths.overall.lessons, 4, 'overall row still spans the whole period');
+  assert.equal(maths.overall.attendanceRate, 75);
+});
+
+test('comparison: subjects are compared separately and a month with no lessons yields no row', () => {
+  const rows: Observation[] = [
+    { ...comparisonBase, lessonId: 'aug-m', lessonDate: '2026-08-10' },
+    { ...comparisonBase, subjectName: 'English', lessonId: 'aug-e', lessonDate: '2026-08-12' },
+    { ...comparisonBase, subjectName: 'English', lessonId: 'sep-e', lessonDate: '2026-09-09' },
+  ];
+
+  const comparison = groupReportsByMonth(rows, undefined);
+  assert.deepEqual(comparison.map((c) => c.subjectName), ['English', 'Mathematics']);
+
+  const maths = comparison.find((c) => c.subjectName === 'Mathematics')!;
+  assert.deepEqual(maths.months.map((m) => m.month), ['2026-08'], 'September has no Mathematics record');
+  assert.equal(maths.overall.lessons, 1);
+
+  const english = comparison.find((c) => c.subjectName === 'English')!;
+  assert.deepEqual(english.months.map((m) => m.month), ['2026-08', '2026-09']);
+});
+
+test('comparison: summarizeByMonth buckets strictly by lessonDate month and orders oldest first', () => {
+  const rows: Observation[] = [
+    { ...comparisonBase, lessonId: 'oct', lessonDate: '2026-10-31' },
+    { ...comparisonBase, lessonId: 'aug', lessonDate: '2026-08-01' },
+    { ...comparisonBase, lessonId: 'dec', lessonDate: '2026-12-01' },
+  ];
+  assert.deepEqual(summarizeByMonth(rows, undefined).map((m) => m.month), ['2026-08', '2026-10', '2026-12']);
+  assert.deepEqual(summarizeByMonth([], undefined), []);
+});
+
+test('comparison: result trend ranks evaluation statuses so past months can be compared to today', () => {
+  assert.equal(resultTrend('EXCELLENT', 'GOOD'), 'up');
+  assert.equal(resultTrend('GOOD', 'EXCELLENT'), 'down');
+  assert.equal(resultTrend('GOOD', 'GOOD'), 'flat');
+  assert.equal(resultTrend('ACTIVE', 'MODERATE'), 'up');
+  assert.equal(resultTrend('PASSIVE', 'ACTIVE'), 'down');
+  assert.equal(resultTrend('Always Completed', 'Usually Completed'), 'up');
+  assert.equal(resultTrend('Frequently Late', 'Always On Time'), 'down');
+  assert.equal(resultTrend('No data', 'GOOD'), 'flat', 'unranked statuses are not scored as a change');
+});
+
 // §168: Comment Requirement for Needs Improvement Observations
 test('§168: Needs improvement observations mandate documentation in observations summary', () => {
   const rows: Observation[] = [
@@ -510,8 +726,9 @@ test('§168: Needs improvement observations mandate documentation in observation
       attendance: 'PRESENT',
       performance: 'NEEDS_IMPROVEMENT',
       participation: 'PASSIVE',
-      homework: 'NOT_COMPLETED',
+      homework: 'RARELY_COMPLETED',
       conduct: 'NEEDS_IMPROVEMENT',
+      punctuality: 'FREQUENTLY_LATE',
       comment: 'Disruptive behaviour and incomplete assignment',
     },
   ];

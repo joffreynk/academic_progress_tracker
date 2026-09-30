@@ -12,6 +12,7 @@ interface TimelineRecord {
   participation: string | null;
   homework: string | null;
   conduct: string | null;
+  punctuality: string | null;
   comment: string | null;
   status: string;
 }
@@ -174,17 +175,18 @@ export default function StudentProfileModal({
                 <div className="table-scroll">
                   <table>
                     <thead>
-                      <tr>
-                        <th>Date</th>
-                        <th>Subject</th>
-                        <th>Topic</th>
-                        <th>Attendance</th>
-                        <th>Performance</th>
-                        <th>Participation</th>
-                        <th>Homework</th>
-                        <th>Conduct</th>
-                        <th>Observation Notes</th>
-                      </tr>
+                        <tr>
+                          <th>Date</th>
+                          <th>Subject</th>
+                          <th>Topic</th>
+                          <th>Attendance</th>
+                          <th>Performance</th>
+                          <th>Conduct</th>
+                          <th>Punctuality</th>
+                          <th>Participation</th>
+                          <th>Homework</th>
+                          <th>Observation Notes</th>
+                        </tr>
                     </thead>
                     <tbody>
                       {timeline.map((t, i) => (
@@ -198,9 +200,10 @@ export default function StudentProfileModal({
                             </span>
                           </td>
                           <td>{t.performance ? t.performance.replace('_', ' ') : '—'}</td>
+                          <td>{t.conduct ? t.conduct.replace('_', ' ') : '—'}</td>
+                          <td>{t.punctuality ? t.punctuality.replace('_', ' ') : '—'}</td>
                           <td>{t.participation || '—'}</td>
                           <td>{t.homework ? t.homework.replace('_', ' ') : '—'}</td>
-                          <td>{t.conduct ? t.conduct.replace('_', ' ') : '—'}</td>
                           <td style={{ fontSize: 12, color: '#4b5563' }}>{t.comment || '—'}</td>
                         </tr>
                       ))}

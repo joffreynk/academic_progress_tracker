@@ -1,9 +1,11 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, FileText, UserX, BookOpen, RefreshCw } from 'lucide-react';
+import PeriodPicker from './PeriodPicker';
+import { periodLabel, type Period } from '@/lib/period';
 
 interface DataQualityData {
-  month: string;
+  period: Period;
   drafts: {
     id: string;
     lessonDate: string;
@@ -44,30 +46,30 @@ interface DataQualityData {
 
 export default function DataQualityView({
   api,
-  currentMonth,
+  today,
   onOpenReport,
 }: {
   api: (view: string, params?: Record<string, string>) => Promise<any>;
-  currentMonth: string;
+  today: string;
   onOpenReport?: (id: string) => void;
 }) {
-  const [month, setMonth] = useState(currentMonth);
+  const [range, setRange] = useState({ from: '', to: '' });
   const [data, setData] = useState<DataQualityData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadData = (m: string) => {
+  const loadData = (r: { from: string; to: string }) => {
     setLoading(true);
     setError(null);
-    api('dataQuality', { month: m })
+    api('dataQuality', { ...(r.from ? { from: r.from } : {}), ...(r.to ? { to: r.to } : {}) })
       .then((d) => setData(d))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    loadData(month);
-  }, [month]);
+    loadData(range);
+  }, [range]);
 
   return (
     <div className="panel data-quality-panel">
@@ -80,19 +82,23 @@ export default function DataQualityView({
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, margin: 0 }}>
-            <span style={{ fontSize: 13, fontWeight: 600 }}>Period:</span>
-            <input
-              type="month"
-              value={month}
-              onChange={(e) => setMonth(e.target.value)}
-              style={{ width: 140 }}
-            />
-          </label>
-          <button className="btn outline" onClick={() => loadData(month)} disabled={loading}>
+          <span style={{ fontSize: 12, color: '#748792' }}>
+            {data ? `Auditing ${periodLabel(data.period)}` : 'Loading period'}
+          </span>
+          <button className="btn outline" onClick={() => loadData(range)} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'spinning' : ''} /> Refresh
           </button>
         </div>
+      </div>
+
+      <div style={{ padding: '0 25px 20px' }}>
+        <PeriodPicker
+          from={range.from}
+          to={range.to}
+          today={today}
+          onChange={setRange}
+          label="Audit period"
+        />
       </div>
 
       {error && <div className="notice-banner" style={{ background: '#fef2f2', color: '#991b1b', marginBottom: 16 }}>{error}</div>}
@@ -134,7 +140,7 @@ export default function DataQualityView({
               <div className="stat-value" style={{ color: data.studentsWithNoRecordsCount ? '#c67a53' : '#22a57d' }}>
                 {data.studentsWithNoRecordsCount}
               </div>
-              <small style={{ color: '#748792' }}>Zero observations this month</small>
+              <small style={{ color: '#748792' }}>Zero observations in this period</small>
             </div>
           </div>
 
@@ -226,7 +232,7 @@ export default function DataQualityView({
                 <UserX size={16} color="#c67a53" /> Active Students with No Records ({data.studentsWithNoRecordsCount})
               </h3>
               {data.studentsWithNoRecords.length === 0 ? (
-                <p style={{ color: '#22a57d', fontSize: 13 }}>All active enrolled students have at least one record this month!</p>
+                <p style={{ color: '#22a57d', fontSize: 13 }}>All active enrolled students have at least one record in this period!</p>
               ) : (
                 <div className="table-scroll">
                   <table>
@@ -257,7 +263,7 @@ export default function DataQualityView({
                 <BookOpen size={16} color="#748792" /> Active Subjects with No Lessons ({data.subjectsWithNoRecords.length})
               </h3>
               {data.subjectsWithNoRecords.length === 0 ? (
-                <p style={{ color: '#22a57d', fontSize: 13 }}>Every active curriculum subject has recorded lessons this month.</p>
+                <p style={{ color: '#22a57d', fontSize: 13 }}>Every active curriculum subject has recorded lessons in this period.</p>
               ) : (
                 <div className="table-scroll">
                   <table>

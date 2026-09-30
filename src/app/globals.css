@@ -63,3 +63,50 @@ th.sortable:hover{background:#f0f4f5;color:#2c4154}
 .card-actions-row button:hover{background:#edf6f5;border-color:#b4dfd8;color:#128477}
 .card-actions-row button.primary-btn{background:#159788;color:#fff;border-color:#159788}
 .card-actions-row button.primary-btn:hover{background:#0e8175}
+/* Reporting Period Picker */
+.period-picker{border:1px solid #e4ebee;border-radius:10px;background:#fbfdfd;padding:15px 17px;display:flex;flex-direction:column;gap:13px;grid-column:1/-1}
+.period-picker-head{display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+.period-picker-label{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:800;letter-spacing:.06em;color:#2f4a5c;margin:0}
+.period-picker-label svg{color:#159688}
+.period-picker-summary{font-size:11px;color:#8294a0}
+.period-picker-head .btn{margin-left:auto;height:30px;padding:0 12px;font-size:11px}
+.period-presets{display:flex;flex-wrap:wrap;gap:7px}
+.period-preset{border:1px solid #dbe5e8;background:#fff;color:#4d6373;border-radius:20px;padding:6px 13px;font-size:11px;font-weight:700;transition:.15s}
+.period-preset:hover{border-color:#95c9c3;background:#f4fbf9;color:#128477}
+.period-preset.active{background:#149788;border-color:#149788;color:#fff}
+.period-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.period-inputs label{font-size:10px;letter-spacing:.06em;color:#7d8f9c;gap:5px}
+.period-inputs input{height:38px;font-size:12px}
+.period-months{display:flex;flex-wrap:wrap;gap:6px}
+.period-month{display:inline-flex;align-items:center;gap:5px;background:#eef7f5;color:#128477;border-radius:5px;padding:4px 9px;font-size:10px;font-weight:800;letter-spacing:.02em}
+.period-month.locked{background:#fff3de;color:#ad7925}
+.period-hint{display:flex;align-items:center;gap:6px;margin:0;font-size:11px;font-weight:600}
+.period-hint.error{color:#ad553e}
+@media(max-width:620px){.period-inputs{grid-template-columns:1fr}}
+
+/* Month-over-Month Comparison */
+.compare-block{margin-top:22px}
+.compare-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.compare-head h4{margin:0;font-size:13px;font-weight:700;color:#2c4154}
+.compare-head p{margin:0;font-size:11px;color:#8a99a3}
+.compare-subject{margin-bottom:20px}
+.compare-subject>h5{margin:0 0 7px;font-size:11px;font-weight:800;letter-spacing:.06em;color:#61798a}
+.compare-table{width:100%;border-collapse:collapse;font-size:11px;min-width:0}
+.compare-table th{height:36px;padding:0 12px;background:#f7f9f9;font-size:9px;letter-spacing:.07em}
+.compare-table th:first-child{text-align:left;color:#93a3ad;width:150px}
+.compare-table th.criterion{text-align:left}
+.compare-table td{padding:9px 12px;font-size:11px;white-space:nowrap}
+.compare-table tr.total-row td{background:#f7faf9;font-weight:700;color:#2c4154}
+.compare-value{color:#3d5566;font-weight:600}
+.compare-value.muted-cell{color:#b3bec5;font-weight:500}
+.compare-delta{display:inline-flex;align-items:center;gap:2px;margin-left:5px;font-size:9px;font-weight:800}
+.compare-delta.up{color:#26915f}
+.compare-delta.down{color:#c65f3e}
+.compare-delta.flat{color:#a8b4bb}
+.compare-pill{display:inline-flex;align-items:center;border-radius:5px;padding:3px 7px;font-size:10px;font-weight:800}
+.compare-pill.EXCELLENT{background:#e3f7ed;color:#26915f}
+.compare-pill.GOOD{background:#e9f2ff;color:#4c80ba}
+.compare-pill.NEEDS_IMPROVEMENT{background:#fff0e9;color:#c67a53}
+.compare-pill.other{background:#eef2f4;color:#6c7a83}
+.compare-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px;font-size:10px;color:#8a99a3}
+.compare-legend span{display:inline-flex;align-items:center;gap:5px}

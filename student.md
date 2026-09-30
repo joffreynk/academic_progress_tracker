@@ -1422,10 +1422,16 @@ Admin may have a controlled correction workflow for exceptional cases.
 
 Do NOT simply give teachers an unrestricted date override.
 
+Admin can configure the override period in Organization Settings:
+
+* **Admin Date Override Days** — number of days back that Admin can correct (default: 14 days). Admin can set this to any value (more or fewer days) to allow corrections further back in time.
+* **Admin Can Override Future** — whether Admin can set lesson dates in the future (default: true).
+* **Admin Override Requires Reason** — whether Admin must provide a reason for the override (default: true).
+
 If Admin needs to create or correct an older record:
 
 * use an explicit Admin action
-* require reason
+* require reason (if configured)
 * record audit log
 * identify administrator
 * timestamp action

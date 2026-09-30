@@ -8,6 +8,20 @@
       "when": 1790606439616,
       "tag": "0000_graceful_blue_shield",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790749984686,
+      "tag": "0001_first_ultron",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790750061709,
+      "tag": "0002_backfill_observation_enums",
+      "breakpoints": true
     }
   ]
 }

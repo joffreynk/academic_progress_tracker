@@ -16,6 +16,7 @@ interface Summary {
   participation: Record<string, number>;
   homework: Record<string, number>;
   conduct: Record<string, number>;
+  punctuality: Record<string, number>;
   attendanceRate: number | null;
   performanceResult: string;
   participationResult: string;
@@ -26,12 +27,14 @@ interface Summary {
 
 export default function StatisticsView({
   school,
-  month,
+  period,
+  fileTag,
   summaries,
   rawObservations,
 }: {
   school: string;
-  month: string;
+  period: string;
+  fileTag: string;
   summaries: Summary[];
   rawObservations: Observation[];
 }) {
@@ -56,7 +59,7 @@ export default function StatisticsView({
     });
   }, [filters, summaries]);
 
-  // Aggregate all raw observations across the school for this month
+    // Aggregate all raw observations across the school for this reporting period
   const stats = useMemo(() => {
     const totalObs = filteredObservations.length;
     const lessonsCount = new Set(filteredObservations.map((r) => r.lessonId)).size;
@@ -78,6 +81,7 @@ export default function StatisticsView({
     const participation = tally('participation');
     const homework = tally('homework');
     const conduct = tally('conduct');
+    const punctuality = tally('punctuality');
 
     const attended = (attendance.PRESENT || 0) + (attendance.LATE || 0);
     const attendanceTotal = attended + (attendance.ABSENT || 0);
@@ -92,6 +96,7 @@ export default function StatisticsView({
       participation,
       homework,
       conduct,
+      punctuality,
       overallAttendanceRate,
       reportActivity: buildReportActivitySeries(filteredObservations),
     };
@@ -105,7 +110,7 @@ export default function StatisticsView({
     // Sheet 1: Aggregate Distributions
     const sheet1 = book.addWorksheet('School-wide Distributions');
     sheet1.addRow(['SCHOOL-WIDE ACADEMIC & BEHAVIOURAL STATISTICS']);
-    sheet1.addRow([school, `Reporting Period: ${month}`]);
+    sheet1.addRow([school, `Reporting Period: ${period}`]);
     sheet1.addRow(['Total Lessons', stats.lessonsCount, 'Total Observations', stats.totalObs, 'Students Covered', stats.studentsCovered]);
     sheet1.addRow(['Overall Attendance Rate', `${stats.overallAttendanceRate}%`]);
     sheet1.addRow([]);
@@ -178,7 +183,7 @@ export default function StatisticsView({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${school.replace(/\s+/g, '_')}-${month}-Statistics.xlsx`;
+    a.download = `${school.replace(/\s+/g, '_')}-${fileTag}-Statistics.xlsx`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
@@ -196,7 +201,7 @@ export default function StatisticsView({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${school.replace(/\s+/g, '_')}-${month}-Statistics.csv`;
+    a.download = `${school.replace(/\s+/g, '_')}-${fileTag}-Statistics.csv`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
@@ -219,7 +224,7 @@ export default function StatisticsView({
           <div className="eyebrow">{school.toUpperCase()} · STATISTICAL INTELLIGENCE</div>
           <h2>Academic & Behavioural Distribution Analytics</h2>
           <p>
-            {month} · {stats.lessonsCount} lessons recorded · {stats.studentsCovered} students evaluated · {stats.totalObs} total observations
+            {period} · {stats.lessonsCount} lessons recorded · {stats.studentsCovered} students evaluated · {stats.totalObs} total observations
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
@@ -303,9 +308,9 @@ export default function StatisticsView({
         <DistributionCard
           title="Homework & Assignment Completion"
           data={[
-            { label: 'Completed', count: stats.homework.COMPLETED || 0, color: '#22a57d' },
-            { label: 'Not Completed', count: stats.homework.NOT_COMPLETED || 0, color: '#c67a53' },
-            { label: 'Not Applicable', count: stats.homework.NOT_APPLICABLE || 0, color: '#94a3b8' },
+            { label: 'Always Completed', count: stats.homework.ALWAYS_COMPLETED || 0, color: '#22a57d' },
+            { label: 'Usually Completed', count: stats.homework.USUALLY_COMPLETED || 0, color: '#3b82f6' },
+            { label: 'Rarely Completed', count: stats.homework.RARELY_COMPLETED || 0, color: '#c67a53' },
           ]}
         />
 
@@ -316,6 +321,16 @@ export default function StatisticsView({
             { label: 'Excellent', count: stats.conduct.EXCELLENT || 0, color: '#22a57d' },
             { label: 'Good', count: stats.conduct.GOOD || 0, color: '#3b82f6' },
             { label: 'Needs Improvement', count: stats.conduct.NEEDS_IMPROVEMENT || 0, color: '#c67a53' },
+          ]}
+        />
+
+        {/* CHART 6: Punctuality */}
+        <DistributionCard
+          title="Punctuality"
+          data={[
+            { label: 'Always On Time', count: stats.punctuality.ALWAYS_ON_TIME || 0, color: '#22a57d' },
+            { label: 'Occasionally Late', count: stats.punctuality.OCCASIONALLY_LATE || 0, color: '#d79c41' },
+            { label: 'Frequently Late', count: stats.punctuality.FREQUENTLY_LATE || 0, color: '#c67a53' },
           ]}
         />
 
