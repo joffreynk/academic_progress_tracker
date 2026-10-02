@@ -43,6 +43,7 @@ export default function BehaviourView({
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loading flag for a fetch triggered by the filter
     loadData();
   }, [filterFollowUp]);
 

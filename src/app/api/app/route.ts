@@ -9,12 +9,16 @@ import { saveLesson } from '@/lib/lessons';
 import { groupReports, groupReportsByMonth } from '@/lib/reporting';
 import { resolvePeriod, monthStart, monthEnd, periodSlug, MONTH_PATTERN } from '@/lib/period';
 import { reviewTransition } from '@/lib/review';
-import { normalizeTeacherAssignmentImportRow } from '@/lib/importing';
+import { normalizeTeacherAssignmentImportRow, canonicalSubjectName, gradeNameForClass, placeholderTeacherEmail, subjectCodeFor, subjectKey } from '@/lib/importing';
+import { logoUrlSchema } from '@/lib/logo';
+import { runTransaction } from '@/db';
 
 export const dynamic='force-dynamic';
-const fail=(e:unknown)=>{ if(e instanceof AppError){ console.error(`[api] AppError ${e.status}: ${e.message}`); return Response.json({error:e.message},{status:e.status}); } if(e instanceof z.ZodError){ console.error('[api] ZodError:', JSON.stringify(e.issues)); return Response.json({error:e.issues[0]?.message||'Invalid input'},{status:400}); } console.error('Application request failed',e); return Response.json({error:'The request could not be completed.'},{status:500}); };
+const fail=(e:unknown)=>{ if(e instanceof AppError){ console.error(`[api] AppError ${e.status}: ${e.message}`); return Response.json({error:e.message},{status:e.status}); } if(e instanceof z.ZodError){ console.error('[api] ZodError:', JSON.stringify(e.issues)); const detail=e.issues.slice(0,4).map(i=>`${i.path.join('.')||'value'}: ${i.message}`).join('; '); return Response.json({error:detail||'Invalid input'},{status:400}); } console.error('Application request failed',e); return Response.json({error:'The request could not be completed.'},{status:500}); };
 const str=(v:unknown)=>z.string().max(200).parse(v);
 const isValidTimezone=(tz:string)=>{try{new Intl.DateTimeFormat('en-US',{timeZone:tz});return true}catch{return false}};
+// URL-safe secret that never starts with a formula trigger so credentials CSV cells stay paste-safe.
+const generatePassword=()=>{let password='';do{password=randomBytes(18).toString('base64url');}while(!/^[A-Za-z0-9]/.test(password));return password;};
 export async function GET(req:Request){try{
  const user=await requireUser(); const url=new URL(req.url); const view=url.searchParams.get('view')||'overview';
  if(user.role==='SUPER_ADMIN'){
@@ -61,7 +65,7 @@ export async function GET(req:Request){try{
     db.select().from(subjects).where(eq(subjects.organizationId,org.id)).orderBy(subjects.name),
     user.role==='ADMIN'?db.select({id:teachers.id,name:teachers.name,email:teachers.email,teacherId:teachers.teacherId,department:teachers.department,active:teachers.active}).from(teachers).where(eq(teachers.organizationId,org.id)).orderBy(teachers.name):Promise.resolve([]),
     db.select().from(assignments).where(myAssignment),
-    user.role==='ADMIN'?db.select().from(students).where(eq(students.organizationId,org.id)).orderBy(students.fullName).limit(300):Promise.resolve([])
+    user.role==='ADMIN'?db.select().from(students).where(eq(students.organizationId,org.id)).orderBy(students.fullName).limit(2000):Promise.resolve([])
   ]);
    const reportPolicy=await reportDatePolicy(org.id);
   return Response.json({years,terms:ts,grades:user.role==='TEACHER'?gs.filter(g=>cs.some(c=>ass.some(a=>a.classId===c.id)&&c.gradeId===g.id)):gs,classes:user.role==='TEACHER'?cs.filter(c=>ass.some(a=>a.classId===c.id)):cs,subjects:user.role==='TEACHER'?ss.filter(s=>ass.some(a=>a.subjectId===s.id)):ss,teachers:teach,assignments:ass,students:allStudents,today:schoolToday(org.timezone),windowDays:reportPolicy.days,allowFutureDates:user.role==='ADMIN'&&reportPolicy.allowFuture,minDate:dateMinus(schoolToday(org.timezone),reportPolicy.days),organization:{id:org.id,name:org.name,timezone:org.timezone,code:org.code,logoUrl:org.logoUrl,domain:org.domain}});
@@ -197,7 +201,7 @@ export async function POST(req:Request){try{
    const org=await orgFor(user),teacher=await teacherFor(user);
    const [draft]=await db.select({id:lessons.id}).from(lessons).where(and(eq(lessons.id,x.id),eq(lessons.organizationId,org.id),eq(lessons.teacherId,teacher.id),eq(lessons.status,'DRAFT')));
    if(!draft)throw new AppError('Only your own draft reports can be deleted.',403);
-   await db.transaction(async tx=>{await tx.delete(records).where(and(eq(records.organizationId,org.id),eq(records.dailyLessonId,draft.id)));await tx.delete(lessons).where(and(eq(lessons.id,draft.id),eq(lessons.organizationId,org.id),eq(lessons.teacherId,teacher.id),eq(lessons.status,'DRAFT')));});
+   await runTransaction(async tx=>{await tx.delete(records).where(and(eq(records.organizationId,org.id),eq(records.dailyLessonId,draft.id)));await tx.delete(lessons).where(and(eq(lessons.id,draft.id),eq(lessons.organizationId,org.id),eq(lessons.teacherId,teacher.id),eq(lessons.status,'DRAFT')));});
    await audit(org.id,user.id,'DRAFT_DELETED','daily_lesson',draft.id);return Response.json({ok:true});
  }
  if(action==='observation'){ 
@@ -238,7 +242,7 @@ export async function POST(req:Request){try{
   }
  if(user.role==='SUPER_ADMIN'){ 
   if(action==='organization'){
-    const data=z.object({name:z.string().min(2),code:z.string().min(2).max(25),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),domain:z.string().max(200).optional().nullable(),logoUrl:z.string().max(500).optional().nullable(),id:z.string().optional(),active:z.boolean().optional()}).parse(raw.data);
+    const data=z.object({name:z.string().min(2),code:z.string().min(2).max(25),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),domain:z.string().max(200).optional().nullable(),logoUrl:logoUrlSchema.optional().nullable(),id:z.string().optional(),active:z.boolean().optional()}).parse(raw.data);
    const [org]=data.id?await db.update(organizations).set({name:data.name,code:data.code.toUpperCase(),timezone:data.timezone,domain:data.domain||null,logoUrl:data.logoUrl||null,active:data.active??true,updatedAt:new Date()}).where(eq(organizations.id,data.id)).returning():await db.insert(organizations).values({name:data.name,code:data.code.toUpperCase(),timezone:data.timezone,domain:data.domain||null,logoUrl:data.logoUrl||null}).returning();
    if(!org) throw new AppError('Organization not found.',404);
    if(!data.id){await db.insert(settings).values({organizationId:org.id}); await db.insert(grades).values(Array.from({length:13},(_,i)=>({organizationId:org.id,name:`Grade ${i+1}`,orderIndex:i+1})));}
@@ -250,15 +254,15 @@ export async function POST(req:Request){try{
    if(!org?.primaryAdminUserId)throw new AppError('Organization administrator not found.',404);
    const [admin]=await db.select({id:users.id}).from(users).where(and(eq(users.id,org.primaryAdminUserId),eq(users.organizationId,org.id),eq(users.role,'ADMIN')));
    if(!admin)throw new AppError('Administrator not found.',404);
-   await db.update(users).set({passwordHash:await hash(x.password,12),active:true,updatedAt:new Date()}).where(eq(users.id,admin.id));
+   await db.update(users).set({passwordHash:await hash(x.password,8),active:true,updatedAt:new Date()}).where(eq(users.id,admin.id));
    await db.delete(sessions).where(eq(sessions.userId,admin.id));
    await audit(null,user.id,'ADMIN_ACCESS_RESET','user',admin.id,{organizationId:org.id});return Response.json({ok:true});
   }
   if(action==='admin'){
    const data=z.object({organizationId:z.string(),name:z.string().min(2),username:z.string().min(3),email:z.email(),password:z.string().min(12)}).parse(raw.data);
    const [org]=await db.select().from(organizations).where(eq(organizations.id,data.organizationId));if(!org)throw new AppError('Organization not found.',404);
-   const passwordHash=await hash(data.password,12);
-   const admin=await db.transaction(async tx=>{if(org.primaryAdminUserId){await tx.update(users).set({active:false,updatedAt:new Date()}).where(and(eq(users.id,org.primaryAdminUserId),eq(users.organizationId,org.id)));}const [created]=await tx.insert(users).values({organizationId:org.id,name:data.name,username:data.username.toLowerCase(),email:data.email.toLowerCase(),passwordHash,role:'ADMIN'}).returning();await tx.update(organizations).set({primaryAdminUserId:created.id,updatedAt:new Date()}).where(eq(organizations.id,org.id));return created;});await audit(null,user.id,org.primaryAdminUserId?'ADMIN_REPLACED':'ADMIN_CREATED','user',admin.id,{organizationId:org.id});return Response.json({ok:true});
+   const passwordHash=await hash(data.password,8);
+   const admin=await runTransaction(async tx=>{if(org.primaryAdminUserId){await tx.update(users).set({active:false,updatedAt:new Date()}).where(and(eq(users.id,org.primaryAdminUserId),eq(users.organizationId,org.id)));}const [created]=await tx.insert(users).values({organizationId:org.id,name:data.name,username:data.username.toLowerCase(),email:data.email.toLowerCase(),passwordHash,role:'ADMIN'}).returning();await tx.update(organizations).set({primaryAdminUserId:created.id,updatedAt:new Date()}).where(eq(organizations.id,org.id));return created;});await audit(null,user.id,org.primaryAdminUserId?'ADMIN_REPLACED':'ADMIN_CREATED','user',admin.id,{organizationId:org.id});return Response.json({ok:true});
   }
   throw new AppError('Unknown action.',404);
  }
@@ -268,8 +272,8 @@ export async function POST(req:Request){try{
    const x=z.object({teacherId:z.string().uuid(),password:z.string().min(12)}).parse(raw.data);
    const [target]=await db.select().from(teachers).where(and(eq(teachers.id,x.teacherId),eq(teachers.organizationId,oid)));
    if(!target)throw new AppError('Teacher not found.',404);
-   const passwordHash=await hash(x.password,12);
-   await db.transaction(async tx=>{
+   const passwordHash=await hash(x.password,8);
+   await runTransaction(async tx=>{
      await tx.update(users).set({passwordHash,updatedAt:new Date()}).where(and(eq(users.id,target.userId),eq(users.organizationId,oid)));
      await tx.delete(sessions).where(eq(sessions.userId,target.userId));
    });
@@ -282,7 +286,7 @@ export async function POST(req:Request){try{
     if(!old)throw new AppError('Report not found.',404);
     if(x.lessonDate===old.lessonDate)throw new AppError('Choose a different lesson date.');
     const today=schoolToday(org.timezone);
-    // §39: the admin-configured window governs corrections too; future dates only when enabled.
+    // Â§39: the admin-configured window governs corrections too; future dates only when enabled.
     const policy=await reportDatePolicy(oid);
     const oldest=dateMinus(today,policy.days);
     if(x.lessonDate<oldest)throw new AppError(`The corrected date must fall within the configured ${reportWindowLabel(policy.days)} reporting window (${oldest} to ${today}).`);
@@ -302,81 +306,103 @@ export async function POST(req:Request){try{
    const x=z.object({teacherId:z.string().uuid(),active:z.boolean()}).parse(raw.data);
    const [target]=await db.select().from(teachers).where(and(eq(teachers.id,x.teacherId),eq(teachers.organizationId,oid)));
    if(!target)throw new AppError('Teacher not found.',404);
-   await db.transaction(async tx=>{
+   await runTransaction(async tx=>{
      await tx.update(teachers).set({active:x.active,updatedAt:new Date()}).where(eq(teachers.id,target.id));
      await tx.update(users).set({active:x.active,updatedAt:new Date()}).where(and(eq(users.id,target.userId),eq(users.organizationId,oid),eq(users.role,'TEACHER')));
      if(!x.active)await tx.delete(sessions).where(eq(sessions.userId,target.userId));
    });
    await audit(oid,user.id,x.active?'ACCOUNT_ACTIVATED':'ACCOUNT_DEACTIVATED','teacher',target.id,{previous:target.active,new:x.active});return Response.json({ok:true});
  }
- if(action==='import'){
-  const input=z.object({kind:z.enum(['students','teachers','assignments']),rows:z.array(z.record(z.string(),z.unknown())).min(1).max(300)}).parse(raw.data);
-  const [allClasses,allGrades,allYears,allSubjects,allTeachers]=await Promise.all([db.select().from(classes).where(eq(classes.organizationId,oid)),db.select().from(grades).where(eq(grades.organizationId,oid)),db.select().from(academicYears).where(eq(academicYears.organizationId,oid)),db.select().from(subjects).where(eq(subjects.organizationId,oid)),db.select().from(teachers).where(eq(teachers.organizationId,oid))]);
-  const clean=(v:unknown)=>String(v??'').trim();const errors:{row:number;reason:string}[]=[];const credentials:{email:string;password:string}[]=[];let imported=0,updated=0;
-  for(let i=0;i<input.rows.length;i++)try{
+  if(action==='import'){
+   const input=z.object({kind:z.enum(['students','teachers','assignments']),rows:z.array(z.record(z.string(),z.unknown())).min(1).max(1000)}).parse(raw.data);
+   const [loadedClasses,loadedGrades,loadedYears,loadedSubjects,allTeachers,loadedAssignments]=await Promise.all([db.select().from(classes).where(eq(classes.organizationId,oid)),db.select().from(grades).where(eq(grades.organizationId,oid)),db.select().from(academicYears).where(eq(academicYears.organizationId,oid)),db.select().from(subjects).where(eq(subjects.organizationId,oid)),db.select().from(teachers).where(eq(teachers.organizationId,oid)),db.select().from(assignments).where(eq(assignments.organizationId,oid))]);
+   const allClasses=[...loadedClasses],allGrades=[...loadedGrades],allYears=[...loadedYears],allSubjects=[...loadedSubjects];
+   const clean=(v:unknown)=>String(v??'').trim();const errors:{row:number;reason:string}[]=[];
+   const credentials:{teacherId:string;name:string;email:string;username:string;password:string;emailProvided:boolean}[]=[];
+   const created={grades:0,classes:0,subjects:0,years:0};let imported=0,updated=0,assignmentsCreated=0,assignmentsUpdated=0;
+   const assignmentIndex=new Map(loadedAssignments.map(a=>[`${a.teacherId}|${a.classId}|${a.subjectId}|${a.academicYearId}`,a]));
+    const activeYear=()=>{const today=new Date().toISOString().slice(0,10);const active=allYears.filter(y=>y.active);const running=active.find(y=>(!y.startDate||y.startDate<=today)&&(!y.endDate||y.endDate>=today));if(running)return running;const latest=[...active].sort((a,b)=>String(b.startDate||'').localeCompare(String(a.startDate||'')))[0];return latest||allYears[0];};
+    const ensureYear=async(name:string)=>{const digits=(v:string)=>v.replace(/\D/g,'');const want=digits(name);const found=allYears.find(y=>y.name.toLowerCase()===name.toLowerCase())||(want.length===8?allYears.find(y=>digits(y.name)===want):undefined);if(found)return found;const m=/^(\d{4})\s*[-â€“â€”]\s*(\d{4})$/.exec(name);if(!m)throw Error('Academic year does not exist in this school.');const [year]=await db.insert(academicYears).values({organizationId:oid,name:`${m[1]}-${m[2]}`,startDate:`${m[1]}-08-01`,endDate:`${m[2]}-07-31`,active:true}).returning();allYears.push(year);created.years++;return year;};
+   const ensureGrade=async(name:string)=>{const found=allGrades.find(g=>g.name.toLowerCase()===name.toLowerCase());if(found)return found;const [grade]=await db.insert(grades).values({organizationId:oid,name,orderIndex:allGrades.length+1,active:true}).returning();allGrades.push(grade);created.grades++;return grade;};
+   const ensureClass=async(name:string,gradeId:string,yearId:string)=>{const found=allClasses.find(c=>c.name.toLowerCase()===name.toLowerCase()&&c.academicYearId===yearId);if(found)return found;const [record]=await db.insert(classes).values({organizationId:oid,gradeId,academicYearId:yearId,name,active:true}).returning();allClasses.push(record);created.classes++;return record;};
+   const ensureSubject=async(rawName:string)=>{const name=canonicalSubjectName(rawName);if(!name)throw Error('Subject name is required.');const found=allSubjects.find(s=>s.name.toLowerCase()===name.toLowerCase()||subjectKey(s.name)===subjectKey(name));if(found)return found;const [subject]=await db.insert(subjects).values({organizationId:oid,name,code:subjectCodeFor(name,new Set(allSubjects.map(s=>s.code))),active:true}).returning();allSubjects.push(subject);created.subjects++;return subject;};
+   // A bare class code such as "7" prefers that year's sections (7A, 7B) over an empty bare class.
+    const resolveClasses=async(name:string,yearId:string)=>{const lower=name.toLowerCase();const bare=/^\d+$/.test(name);const sections=bare?allClasses.filter(c=>c.academicYearId===yearId&&new RegExp(`^${name}[a-z]+$`,'i').test(c.name)):[];if(sections.length)return sections;const inYear=allClasses.filter(c=>c.name.toLowerCase()===lower&&c.academicYearId===yearId);if(inYear.length)return inYear;const anywhere=allClasses.filter(c=>c.name.toLowerCase()===lower);if(anywhere.length)return anywhere;const grade=await ensureGrade(gradeNameForClass(name));return [await ensureClass(name,grade.id,yearId)];};
+   for(let i=0;i<input.rows.length;i++)try{
    const row=input.rows[i];
-   if(input.kind==='students'){
-    const code=clean(row['Student ID']);const name=clean(row['Student Name']);const gradeName=clean(row['Grade']);const className=clean(row['Class']);const yearName=clean(row['Academic Year']);const status=clean(row['Status']).toUpperCase()||'ACTIVE';
-    if(!code||!name||!['ACTIVE','INACTIVE'].includes(status))throw Error('Invalid student ID, name or status.');
-    const g=allGrades.find(x=>x.name.toLowerCase()===gradeName.toLowerCase());const y=allYears.find(x=>x.name===yearName);const c=allClasses.find(x=>x.name.toLowerCase()===className.toLowerCase()&&x.gradeId===g?.id&&x.academicYearId===y?.id);if(!g||!y||!c)throw Error('Grade, class and academic year must exist and match.');
-    const parts=name.split(/\s+/);const firstName=parts.shift()||name,lastName=parts.join(' ')||'—';const [old]=await db.select().from(students).where(and(eq(students.organizationId,oid),eq(students.studentId,code)));
-    if(old){await db.update(students).set({firstName,lastName,fullName:name,gradeId:g.id,classId:c.id,academicYearId:y.id,status,updatedAt:new Date()}).where(eq(students.id,old.id));updated++;}else{await db.insert(students).values({organizationId:oid,studentId:code,firstName,lastName,fullName:name,gradeId:g.id,classId:c.id,academicYearId:y.id,status});imported++;}
-   }else if(input.kind==='teachers'){
-    const hasRosterColumns = ['NO','NAME','SURNAME','EMAIL','SUBJECTS','CLASSES'].some(key => Object.keys(row).some(k => k.trim().toUpperCase() === key));
-    if (hasRosterColumns) {
-      const roster = normalizeTeacherAssignmentImportRow(row as Record<string, string>);
-      const teacherName = `${roster.name} ${roster.surname}`.trim();
-      const email = roster.email.toLowerCase();
-      if (!teacherName || !z.email().safeParse(email).success || !roster.subjects.length || !roster.classes.length) {
-        throw Error('Teacher roster row requires name, email, at least one subject and at least one class.');
+    if(input.kind==='students'){
+     const code=clean(row['Student ID']);const name=clean(row['Student Name']);const gradeName=clean(row['Grade']);const className=clean(row['Class']);const yearName=clean(row['Academic Year']);const statusRaw=clean(row['Status']).toUpperCase();
+     if(!code||!name||!className||(statusRaw&&!['ACTIVE','INACTIVE'].includes(statusRaw)))throw Error('Invalid student ID, name or class.');
+     const y=yearName?await ensureYear(yearName):activeYear();if(!y)throw Error('Create an academic year before importing students.');
+     // The stored class is the source of truth for the grade so the two can never disagree.
+     let c=allClasses.find(x=>x.name.toLowerCase()===className.toLowerCase()&&x.academicYearId===y.id);
+     if(!c){const g=await ensureGrade(gradeName||gradeNameForClass(className));c=await ensureClass(className,g.id,y.id);}
+     const parts=name.split(/\s+/);const firstName=parts.shift()||name,lastName=parts.join(' ')||'â€”';const [old]=await db.select().from(students).where(and(eq(students.organizationId,oid),eq(students.studentId,code)));
+     if(old){await db.update(students).set({firstName,lastName,fullName:name,gradeId:c.gradeId,classId:c.id,academicYearId:y.id,...(statusRaw?{status:statusRaw}:{}),updatedAt:new Date()}).where(eq(students.id,old.id));updated++;}
+     else{const status=statusRaw||'ACTIVE';await db.insert(students).values({organizationId:oid,studentId:code,firstName,lastName,fullName:name,gradeId:c.gradeId,classId:c.id,academicYearId:y.id,status});imported++;}
+    }else if(input.kind==='teachers'){
+     const keys=Object.keys(row).map(k=>k.trim().toUpperCase());const has=(list:string[])=>list.some(k=>keys.includes(k));
+     const hasRosterColumns=(has(['SUBJECTS'])&&has(['CLASSES']))||(has(['NO'])&&has(['NAME'])&&has(['SURNAME']));
+     if(hasRosterColumns){
+      const roster=normalizeTeacherAssignmentImportRow(row as Record<string,string>);
+      const teacherName=`${roster.name} ${roster.surname}`.trim();
+      if(!teacherName)throw Error('Teacher row requires a name.');
+      const parsedEmail=z.email().safeParse(roster.email.toLowerCase());const hasEmail=parsedEmail.success;
+      let teacherId=roster.teacherId;
+      if(!teacherId||teacherId==='AUTO-TEACHER')teacherId=hasEmail?`T-${roster.email.split('@')[0]}`:`T-${teacherName.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,24)}`;
+      const email=hasEmail?parsedEmail.data:'';
+      const [byCode]=await db.select().from(teachers).where(and(eq(teachers.organizationId,oid),eq(teachers.teacherId,teacherId))).limit(1);
+      const byEmail=hasEmail?(await db.select().from(teachers).where(and(eq(teachers.organizationId,oid),eq(teachers.email,email))).limit(1))[0]:undefined;
+      const existing=byCode||byEmail;
+      let teacherRecord=existing;
+      if(existing){
+       const current=existing;
+       await runTransaction(async tx=>{
+        await tx.update(users).set({name:teacherName,updatedAt:new Date(),...(hasEmail?{email}:{})}).where(and(eq(users.id,current.userId),eq(users.organizationId,oid)));
+        await tx.update(teachers).set({name:teacherName,department:roster.nationality||current.department||'',updatedAt:new Date(),...(hasEmail?{email}:{})}).where(eq(teachers.id,current.id));
+       });
+       updated++;
+      }else{
+       const finalEmail=hasEmail?email:placeholderTeacherEmail(teacherId,teacherName,oid);
+       const password=generatePassword();const username=`t.${teacherId.toLowerCase().replace(/[^a-z0-9]/g,'')||'x'}.${oid.slice(0,6)}`;const passwordHash=await hash(password,8);
+       teacherRecord=await runTransaction(async tx=>{
+        const [u]=await tx.insert(users).values({organizationId:oid,name:teacherName,email:finalEmail,username,passwordHash,role:'TEACHER'}).returning();
+        const [t]=await tx.insert(teachers).values({organizationId:oid,userId:u.id,teacherId,name:teacherName,email:finalEmail,department:roster.nationality||''}).returning();
+        return t;
+       });
+       credentials.push({teacherId,name:teacherName,email:finalEmail,username,password,emailProvided:hasEmail});
+       imported++;
       }
-      const teacherId = roster.teacherId || `T-${email.split('@')[0]}`;
-      const [existingTeacher] = await db.select().from(teachers).where(and(eq(teachers.organizationId,oid),eq(teachers.teacherId,teacherId)));
-      const [existingUser] = existingTeacher ? await db.select().from(users).where(and(eq(users.id,existingTeacher.userId),eq(users.organizationId,oid))) : [null];
-      let teacherRecord = existingTeacher;
-      if (existingTeacher) {
-        await db.transaction(async tx => {
-          await tx.update(users).set({name: teacherName, email, updatedAt: new Date()}).where(and(eq(users.id,existingTeacher.userId),eq(users.organizationId,oid)));
-          await tx.update(teachers).set({name: teacherName, email, department: roster.nationality || existingTeacher.department || '', updatedAt: new Date()}).where(eq(teachers.id,existingTeacher.id));
-        });
-        updated++;
-      } else {
-        const password=randomBytes(18).toString('base64url');
-        const username=`t.${teacherId.toLowerCase().replace(/[^a-z0-9]/g,'')}.${oid.slice(0,6)}`;
-        const passwordHash=await hash(password,12);
-        teacherRecord = await db.transaction(async tx => {
-          const [u] = await tx.insert(users).values({organizationId:oid,name:teacherName,email,username,passwordHash,role:'TEACHER'}).returning();
-          const [t] = await tx.insert(teachers).values({organizationId:oid,userId:u.id,teacherId,name:teacherName,email,department:roster.nationality || ''}).returning();
-          return t;
-        });
-        credentials.push({email,password});
-        imported++;
-      }
-      for (const subjectName of roster.subjects) {
-        const subject = allSubjects.find(x => x.name.toLowerCase() === subjectName.toLowerCase());
-        if (!subject) continue;
-        for (const className of roster.classes) {
-          const classRecord = allClasses.find(x => x.name.toLowerCase() === className.toLowerCase());
-          if (!classRecord) continue;
-          const [existingAssignment] = await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,teacherRecord.id),eq(assignments.classId,classRecord.id),eq(assignments.subjectId,subject.id),eq(assignments.academicYearId,classRecord.academicYearId)));
-          if (existingAssignment) {
-            await db.update(assignments).set({active:true,updatedAt:new Date()}).where(eq(assignments.id,existingAssignment.id));
-          } else {
-            await db.insert(assignments).values({organizationId:oid,teacherId:teacherRecord.id,classId:classRecord.id,subjectId:subject.id,academicYearId:classRecord.academicYearId,active:true});
-            imported++;
-          }
+      if(roster.subjects.length&&roster.classes.length&&teacherRecord){
+       const record=teacherRecord;const yearRecord=activeYear();if(!yearRecord)throw Error('Create an academic year before importing teacher assignments.');
+       for(const subjectName of roster.subjects){
+        const subject=await ensureSubject(subjectName);
+        for(const className of roster.classes){
+         for(const classRecord of await resolveClasses(className,yearRecord.id)){
+          const assignmentKey=`${record.id}|${classRecord.id}|${subject.id}|${classRecord.academicYearId}`;
+          const existingAssignment=assignmentIndex.get(assignmentKey);
+          if(existingAssignment){if(!existingAssignment.active){await db.update(assignments).set({active:true,updatedAt:new Date()}).where(eq(assignments.id,existingAssignment.id));assignmentsUpdated++;}}
+          else{const [stored]=await db.insert(assignments).values({organizationId:oid,teacherId:record.id,classId:classRecord.id,subjectId:subject.id,academicYearId:classRecord.academicYearId,active:true}).returning();assignmentIndex.set(assignmentKey,stored);assignmentsCreated++;}
+         }
         }
+       }
       }
-    } else {
+     }else{
       const teacherId=clean(row['Teacher ID']),name=clean(row['Teacher Name']),email=clean(row['Email']).toLowerCase(),department=clean(row['Department']);if(!teacherId||!name||!z.email().safeParse(email).success)throw Error('Invalid teacher ID, name or email.');
       const [old]=await db.select().from(teachers).where(and(eq(teachers.organizationId,oid),eq(teachers.teacherId,teacherId)));
-      if(old){await db.transaction(async tx=>{await tx.update(users).set({name,email,updatedAt:new Date()}).where(and(eq(users.id,old.userId),eq(users.organizationId,oid)));await tx.update(teachers).set({name,department,email,updatedAt:new Date()}).where(eq(teachers.id,old.id));});updated++;}else{const password=randomBytes(18).toString('base64url');const username=`t.${teacherId.toLowerCase().replace(/[^a-z0-9]/g,'')}.${oid.slice(0,6)}`;const passwordHash=await hash(password,12);await db.transaction(async tx=>{const [u]=await tx.insert(users).values({organizationId:oid,name,email,username,passwordHash,role:'TEACHER'}).returning();await tx.insert(teachers).values({organizationId:oid,userId:u.id,teacherId,name,email,department});});credentials.push({email,password});imported++;}
-    }
+      if(old){await runTransaction(async tx=>{await tx.update(users).set({name,email,updatedAt:new Date()}).where(and(eq(users.id,old.userId),eq(users.organizationId,oid)));await tx.update(teachers).set({name,department,email,updatedAt:new Date()}).where(eq(teachers.id,old.id));});updated++;}
+      else{const password=generatePassword();const username=`t.${teacherId.toLowerCase().replace(/[^a-z0-9]/g,'')||'x'}.${oid.slice(0,6)}`;const passwordHash=await hash(password,8);await runTransaction(async tx=>{const [u]=await tx.insert(users).values({organizationId:oid,name,email,username,passwordHash,role:'TEACHER'}).returning();await tx.insert(teachers).values({organizationId:oid,userId:u.id,teacherId,name,email,department});});credentials.push({teacherId,name,email,username,password,emailProvided:true});imported++;}
+     }
    }else{
     const email=clean(row['Teacher Email']).toLowerCase(),className=clean(row['Class']),subjectName=clean(row['Subject']),yearName=clean(row['Academic Year']);const t=allTeachers.find(x=>x.email.toLowerCase()===email),y=allYears.find(x=>x.name===yearName),c=allClasses.find(x=>x.name.toLowerCase()===className.toLowerCase()&&x.academicYearId===y?.id),s=allSubjects.find(x=>x.name.toLowerCase()===subjectName.toLowerCase());if(!t||!y||!c||!s)throw Error('Teacher, class, subject or year not found in this organization.');const [old]=await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,t.id),eq(assignments.classId,c.id),eq(assignments.subjectId,s.id),eq(assignments.academicYearId,y.id)));const active=!['NO','FALSE','INACTIVE','0'].includes(clean(row['Active']).toUpperCase());if(old){await db.update(assignments).set({active,updatedAt:new Date()}).where(eq(assignments.id,old.id));updated++;}else{await db.insert(assignments).values({organizationId:oid,teacherId:t.id,classId:c.id,subjectId:s.id,academicYearId:y.id,active});imported++;}
    }
-  }catch(e){const message=e instanceof Error?e.message:'';const known=['Invalid student ID, name or status.','Grade, class and academic year must exist and match.','Invalid teacher ID, name or email.','Teacher, class, subject or year not found in this organization.','Teacher roster row requires name, email, at least one subject and at least one class.'];errors.push({row:i+2,reason:known.includes(message)?message:'Could not import this row. Check duplicate IDs, email addresses and values.'});}
-  await audit(oid,user.id,'DATA_IMPORT',input.kind,undefined,{imported,updated,errors:errors.length});return Response.json({imported,updated,skipped:errors.length,errors,credentials});
+  }catch(e){const message=e instanceof Error?e.message:'';const known=['Invalid student ID, name or class.','Academic year does not exist in this school.','Create an academic year before importing students.','Create an academic year before importing teacher assignments.','Teacher row requires a name.','Invalid teacher ID, name or email.','Teacher, class, subject or year not found in this organization.'];
+   let reason=known.includes(message)?message:'Could not import this row. Check duplicate IDs, email addresses and values.';
+   if(/constraint failed/i.test(message))reason='A record with this student ID or email address already exists.';
+   const label=input.kind==='students'?clean(input.rows[i]['Student ID'])||clean(input.rows[i]['Student Name']):clean(input.rows[i]['Teacher ID'])||clean(input.rows[i]['Teacher Name'])||clean(input.rows[i]['Teacher Email']);
+   errors.push({row:i+2,reason:label?`${label} â€” ${reason}`:reason});}
+   await audit(oid,user.id,'DATA_IMPORT',input.kind,undefined,{imported,updated,errors:errors.length,credentials:credentials.length,assignments:assignmentsCreated,created});
+   return Response.json({imported,updated,skipped:errors.length,errors,credentials,created,assignments:{created:assignmentsCreated,updated:assignmentsUpdated}});
  }
  if(action==='create'){
   const type=z.enum(['year','term','grade','class','subject','student','teacher','assignment']).parse(raw.type);const d=raw.data; let entityId='';
@@ -386,8 +412,8 @@ export async function POST(req:Request){try{
   if(type==='class'){const x=z.object({name:z.string().min(1),gradeId:z.string(),academicYearId:z.string()}).parse(d);if(!(await db.select().from(grades).where(and(eq(grades.id,x.gradeId),eq(grades.organizationId,oid)))).length || !(await db.select().from(academicYears).where(and(eq(academicYears.id,x.academicYearId),eq(academicYears.organizationId,oid)))).length)throw new AppError('Invalid grade or year.');const [r]=await db.insert(classes).values({...x,organizationId:oid}).returning();entityId=r.id;}
   if(type==='subject'){const x=z.object({name:z.string().min(2),code:z.string().min(2)}).parse(d);const [r]=await db.insert(subjects).values({...x,organizationId:oid,code:x.code.toUpperCase()}).returning();entityId=r.id;}
   if(type==='student'){const x=z.object({studentId:z.string().min(1),firstName:z.string().min(1),lastName:z.string().min(1),gradeId:z.string(),classId:z.string(),academicYearId:z.string()}).parse(d);const [cl]=await db.select().from(classes).where(and(eq(classes.id,x.classId),eq(classes.organizationId,oid),eq(classes.gradeId,x.gradeId),eq(classes.academicYearId,x.academicYearId)));if(!cl)throw new AppError('Invalid class, grade or year.');const [r]=await db.insert(students).values({...x,fullName:`${x.firstName} ${x.lastName}`,organizationId:oid}).returning();entityId=r.id;}
-  if(type==='teacher'){const x=z.object({teacherId:z.string().min(1),name:z.string().min(2),email:z.email(),department:z.string().optional(),username:z.string().min(3),password:z.string().min(12)}).parse(d);const passwordHash=await hash(x.password,12);entityId=await db.transaction(async tx=>{const [u]=await tx.insert(users).values({organizationId:oid,username:x.username.toLowerCase(),email:x.email.toLowerCase(),name:x.name,passwordHash,role:'TEACHER'}).returning();const [r]=await tx.insert(teachers).values({organizationId:oid,userId:u.id,teacherId:x.teacherId,name:x.name,email:x.email,department:x.department}).returning();return r.id;});}
-  if(type==='assignment'){const x=z.object({teacherId:z.string(),classId:z.string(),subjectId:z.string(),academicYearId:z.string()}).parse(d);const [t,c,s,y]=await Promise.all([db.select().from(teachers).where(and(eq(teachers.id,x.teacherId),eq(teachers.organizationId,oid))),db.select().from(classes).where(and(eq(classes.id,x.classId),eq(classes.organizationId,oid),eq(classes.academicYearId,x.academicYearId))),db.select().from(subjects).where(and(eq(subjects.id,x.subjectId),eq(subjects.organizationId,oid))),db.select().from(academicYears).where(and(eq(academicYears.id,x.academicYearId),eq(academicYears.organizationId,oid)))]);if(!t.length||!c.length||!s.length||!y.length)throw new AppError('Teacher, class, subject or year is invalid.');const [r]=await db.insert(assignments).values({...x,organizationId:oid}).returning();entityId=r.id;}
+  if(type==='teacher'){const x=z.object({teacherId:z.string().min(1),name:z.string().min(2),email:z.email(),department:z.string().optional(),username:z.string().min(3),password:z.string().min(12)}).parse(d);const passwordHash=await hash(x.password,8);entityId=await runTransaction(async tx=>{const [u]=await tx.insert(users).values({organizationId:oid,username:x.username.toLowerCase(),email:x.email.toLowerCase(),name:x.name,passwordHash,role:'TEACHER'}).returning();const [r]=await tx.insert(teachers).values({organizationId:oid,userId:u.id,teacherId:x.teacherId,name:x.name,email:x.email,department:x.department}).returning();return r.id;});}
+  if(type==='assignment'){const x=z.object({teacherId:z.string().min(1),classId:z.string().min(1),subjectId:z.string().min(1),academicYearId:z.string().min(1)}).parse(d);const [[t],[c],[s],[y]]=await Promise.all([db.select().from(teachers).where(and(eq(teachers.id,x.teacherId),eq(teachers.organizationId,oid))).limit(1),db.select().from(classes).where(and(eq(classes.id,x.classId),eq(classes.organizationId,oid))).limit(1),db.select().from(subjects).where(and(eq(subjects.id,x.subjectId),eq(subjects.organizationId,oid))).limit(1),db.select().from(academicYears).where(and(eq(academicYears.id,x.academicYearId),eq(academicYears.organizationId,oid))).limit(1)]);if(!t)throw new AppError('Teacher not found.');if(!y)throw new AppError('Academic year not found.');if(!c)throw new AppError('Class not found.');if(c.academicYearId!==y.id)throw new AppError('That class belongs to a different academic year.');if(!s)throw new AppError('Subject not found.');const [existing]=await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,x.teacherId),eq(assignments.classId,x.classId),eq(assignments.subjectId,x.subjectId),eq(assignments.academicYearId,x.academicYearId)));if(existing){if(existing.active)throw new AppError('This assignment already exists.');await db.update(assignments).set({active:true,updatedAt:new Date()}).where(eq(assignments.id,existing.id));entityId=existing.id;}else{const [r]=await db.insert(assignments).values({...x,organizationId:oid,active:true}).returning();entityId=r.id;}}
   await audit(oid,user.id,`${type.toUpperCase()}_CREATED`,type,entityId);return Response.json({ok:true});
  }
  if(action==='updateEntity'){
@@ -401,7 +427,7 @@ export async function POST(req:Request){try{
     const x=z.object({name:z.string().min(2),email:z.email(),department:z.string().optional(),active:z.boolean()}).parse(d);
     const [t]=await db.select().from(teachers).where(and(eq(teachers.id,id),eq(teachers.organizationId,oid)));
     if(!t)throw new AppError('Teacher not found.',404);
-    await db.transaction(async tx=>{
+    await runTransaction(async tx=>{
       await tx.update(teachers).set({...x,updatedAt:new Date()}).where(eq(teachers.id,id));
       await tx.update(users).set({name:x.name,email:x.email.toLowerCase(),active:x.active,updatedAt:new Date()}).where(and(eq(users.id,t.userId),eq(users.organizationId,oid)));
       if(!x.active)await tx.delete(sessions).where(eq(sessions.userId,t.userId));
@@ -428,8 +454,15 @@ export async function POST(req:Request){try{
     await db.update(terms).set(x).where(and(eq(terms.id,id),eq(terms.organizationId,oid)));
   }
   if(type==='assignment'){
-    const x=z.object({active:z.boolean()}).parse(d);
-    await db.update(assignments).set({...x,updatedAt:new Date()}).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
+    const x=z.object({teacherId:z.string().min(1).optional(),classId:z.string().min(1).optional(),subjectId:z.string().min(1).optional(),academicYearId:z.string().min(1).optional(),active:z.boolean().optional()}).parse(d);
+    const [current]=await db.select().from(assignments).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
+    if(!current)throw new AppError('Assignment not found.',404);
+    const next={teacherId:x.teacherId??current.teacherId,classId:x.classId??current.classId,subjectId:x.subjectId??current.subjectId,academicYearId:x.academicYearId??current.academicYearId,active:x.active??current.active};
+    const [[t],[c],[s],[y]]=await Promise.all([db.select().from(teachers).where(and(eq(teachers.id,next.teacherId),eq(teachers.organizationId,oid))).limit(1),db.select().from(classes).where(and(eq(classes.id,next.classId),eq(classes.organizationId,oid))).limit(1),db.select().from(subjects).where(and(eq(subjects.id,next.subjectId),eq(subjects.organizationId,oid))).limit(1),db.select().from(academicYears).where(and(eq(academicYears.id,next.academicYearId),eq(academicYears.organizationId,oid))).limit(1)]);
+    if(!t)throw new AppError('Teacher not found.');if(!y)throw new AppError('Academic year not found.');if(!c)throw new AppError('Class not found.');if(c.academicYearId!==y.id)throw new AppError('That class belongs to a different academic year.');if(!s)throw new AppError('Subject not found.');
+    const clashes=await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,next.teacherId),eq(assignments.classId,next.classId),eq(assignments.subjectId,next.subjectId),eq(assignments.academicYearId,next.academicYearId)));
+    if(clashes.some(a=>a.id!==id))throw new AppError('Another assignment already uses this teacher, class, subject and year.');
+    await db.update(assignments).set({...next,updatedAt:new Date()}).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
   }
   await audit(oid,user.id,`${type.toUpperCase()}_UPDATED`,type,id);
   return Response.json({ok:true});
@@ -456,7 +489,7 @@ export async function POST(req:Request){try{
   await db.update(lessons).set({status:transition.status,reviewComment:x.comment?.trim()||null,reviewedAt:new Date(),reviewedBy:user.id,updatedAt:new Date()}).where(and(eq(lessons.id,x.id),eq(lessons.organizationId,oid),eq(lessons.status,old.status)));await audit(oid,user.id,transition.auditAction,'daily_lesson',x.id,{previousStatus:old.status,newStatus:transition.status,reason:x.comment});return Response.json({ok:true});
  }
  if(action==='settings'){
-  const x=z.object({name:z.string().min(2).optional(),logoUrl:z.string().max(500).optional().nullable(),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),excellentThreshold:z.coerce.number().min(1).max(3),goodThreshold:z.coerce.number().min(1).max(3),homeworkUsuallyThreshold:z.coerce.number().min(0).max(1),punctualityOccasionallyMax:z.coerce.number().min(0).max(1)}).parse(raw.data);
+  const x=z.object({name:z.string().min(2).optional(),logoUrl:logoUrlSchema.optional().nullable(),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),excellentThreshold:z.coerce.number().min(1).max(3),goodThreshold:z.coerce.number().min(1).max(3),homeworkUsuallyThreshold:z.coerce.number().min(0).max(1),punctualityOccasionallyMax:z.coerce.number().min(0).max(1)}).parse(raw.data);
   await db.update(organizations).set({name:x.name||org.name,logoUrl:x.logoUrl!==undefined?x.logoUrl:org.logoUrl,timezone:x.timezone,updatedAt:new Date()}).where(eq(organizations.id,oid));
   await db.update(settings).set({excellentThreshold:x.excellentThreshold,goodThreshold:x.goodThreshold,homeworkUsuallyThreshold:x.homeworkUsuallyThreshold,punctualityOccasionallyMax:x.punctualityOccasionallyMax,version:(await db.select().from(settings).where(eq(settings.organizationId,oid)))[0].version+1,updatedAt:new Date()}).where(eq(settings.organizationId,oid));
   await audit(oid,user.id,'CONFIGURATION_CHANGED','settings',oid);
@@ -464,7 +497,7 @@ export async function POST(req:Request){try{
  }
  if(action==='month'){
    const x=z.object({month:z.string().regex(MONTH_PATTERN),closed:z.boolean()}).parse(raw.data);
-   await db.transaction(async tx=>{
+   await runTransaction(async tx=>{
     if(x.closed){const [rule]=await tx.select().from(settings).where(eq(settings.organizationId,oid));if(!rule)throw new AppError('Reporting settings are unavailable.');await tx.insert(monthlyRuleSnapshots).values({organizationId:oid,month:x.month,version:rule.version,excellentThreshold:rule.excellentThreshold,goodThreshold:rule.goodThreshold,homeworkUsuallyThreshold:rule.homeworkUsuallyThreshold,punctualityOccasionallyMax:rule.punctualityOccasionallyMax}).onConflictDoNothing();}
     await tx.insert(monthClosures).values({organizationId:oid,month:x.month,closed:x.closed}).onConflictDoUpdate({target:[monthClosures.organizationId,monthClosures.month],set:{closed:x.closed,updatedAt:new Date()}});
    });

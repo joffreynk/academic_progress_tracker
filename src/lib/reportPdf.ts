@@ -1,5 +1,5 @@
 'use client';
-import { formatDate, monthLabelShort, periodLabel, periodSlug, type Period } from '@/lib/period';
+import { monthLabelShort, periodLabel, periodSlug, type Period } from '@/lib/period';
 import { resultTrend, type Observation, type Rules, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
 
 type Summary = ReturnType<typeof import('@/lib/reporting').summarize> & {
@@ -14,7 +14,6 @@ const ZEBRA: [number, number, number] = [246, 249, 249];
 
 export const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const countText = (values: Record<string, number>) => Object.entries(values).map(([k, v]) => `${pretty(k)} ${v}`).join(', ') || 'No observations';
-const teachersOf = (rows: { teacherName?: string }[]) => [...new Set(rows.map((r) => r.teacherName).filter(Boolean))].join(', ') || 'Assigned faculty';
 
 const METRICS: { label: string; render: (m: SubjectMonthSummary) => string; numeric?: (m: SubjectMonthSummary) => number | null }[] = [
   { label: 'Lessons recorded', render: (m) => String(m.lessons), numeric: (m) => m.lessons },
@@ -203,10 +202,67 @@ function save(doc: Doc, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-function banner(w: PdfWriter, school: string, heading: string) {
-  w.text(school, { size: 17, bold: true, gap: 1 });
-  w.text(heading, { size: 9, color: MUTED, bold: true, gap: 1 });
-  w.space(6);
+/** Loads the organization logo and returns a downscaled PNG data URL the PDF can embed. */
+export async function loadLogoDataUrl(url: string, maxPx = 320): Promise<string | null> {
+  try {
+    const response = await fetch(url, { cache: 'force-cache' });
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Logo could not be decoded.'));
+      img.src = objectUrl;
+    });
+    URL.revokeObjectURL(objectUrl);
+    const scale = Math.min(1, maxPx / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(image, 0, 0, width, height);
+    return canvas.toDataURL('image/png');
+  } catch {
+    return null;
+  }
+}
+
+function banner(w: PdfWriter, school: string, heading: string, logoDataUrl?: string | null) {
+  const top = w.y;
+  let textX = w.margin;
+  let blockHeight = 34;
+  if (logoDataUrl) {
+    try {
+      const props = w.doc.getImageProperties(logoDataUrl);
+      const scale = Math.min(46 / Math.max(props.height, 1), 110 / Math.max(props.width, 1));
+      const logoWidth = props.width * scale;
+      const logoHeight = props.height * scale;
+      w.doc.addImage(logoDataUrl, props.fileType || 'PNG', w.margin, top, logoWidth, logoHeight);
+      textX = w.margin + logoWidth + 14;
+      blockHeight = Math.max(34, logoHeight);
+    } catch {
+      textX = w.margin;
+    }
+  }
+  w.doc.setFont('helvetica', 'bold');
+  w.doc.setFontSize(17);
+  w.doc.setTextColor(...INK);
+  for (const line of w.wrap(school, 17, w.width - w.margin - textX)) {
+    w.doc.text(line, textX, top + 15);
+    break;
+  }
+  w.doc.setFont('helvetica', 'bold');
+  w.doc.setFontSize(9);
+  w.doc.setTextColor(...MUTED);
+  for (const line of w.wrap(heading, 9, w.width - w.margin - textX)) {
+    w.doc.text(line, textX, top + 29);
+    break;
+  }
+  w.y = top + blockHeight + 6;
   w.doc.setDrawColor(...TEAL); w.doc.setLineWidth(1.6);
   w.doc.line(w.margin, w.y, w.width - w.margin, w.y);
   w.space(14);
@@ -217,27 +273,20 @@ export async function buildStudentPdf(input: {
   school: string; period: Period; closedMonths?: string[]; student: { id: string; name: string; code: string; className: string };
   subjects: Summary[]; overall: ReturnType<typeof import('@/lib/reporting').summarize>;
   comparable?: SubjectComparison[]; overallMonths?: SubjectMonthSummary[]; raw?: Observation[]; rules: Rules;
+  logoDataUrl?: string | null;
 }): Promise<{ doc: Doc; filename: string }> {
-  const { school, period, closedMonths = [], student, subjects, overall, comparable = [], overallMonths = [], raw = [], rules } = input;
+  const { school, period, closedMonths = [], student, subjects, overall, comparable = [], overallMonths = [], raw = [], logoDataUrl = null } = input;
   const months = period.months;
   const doc = await newDoc();
   const w = new PdfWriter(doc);
   const title = `${student.name} — Student Follow-Up`;
-  banner(w, school, 'STUDENT ACADEMIC AND BEHAVIOURAL FOLLOW-UP');
+  banner(w, school, 'STUDENT ACADEMIC AND BEHAVIOURAL FOLLOW-UP', logoDataUrl);
 
   w.facts([
     { label: 'Student name', value: student.name },
     { label: 'Student ID', value: student.code },
     { label: 'Class', value: student.className },
-    { label: 'Reporting period', value: `${periodLabel(period)} (${months.length} month${months.length === 1 ? '' : 's'})` },
-    { label: 'Period from', value: `${formatDate(period.from)} (${period.from})` },
-    { label: 'Period to', value: `${formatDate(period.to)} (${period.to})` },
-    { label: 'Teacher(s)', value: teachersOf(subjects) },
-    { label: 'Calculation version', value: `Version ${overall.version}` },
-    { label: 'Subjects covered', value: `${subjects.length} subject${subjects.length === 1 ? '' : 's'}` },
-    { label: 'Source coverage', value: `${overall.lessons} recorded lesson${overall.lessons === 1 ? '' : 's'}, ${raw.length} observation${raw.length === 1 ? '' : 's'}` },
-    { label: 'Closed months', value: closedMonths.length ? closedMonths.map(monthLabelShort).join(', ') + ' (current rules applied)' : 'None' },
-    { label: 'Generated on', value: new Date().toLocaleString('en-GB') },
+    { label: 'Reporting period', value: `${periodLabel(period)} (${period.from} to ${period.to})` },
   ]);
 
   let sectionNo = 1;
@@ -280,35 +329,29 @@ export async function buildStudentPdf(input: {
   if (overall.observations.length) overall.observations.forEach((o) => w.bullet(`${o.date} · ${o.subject}: ${o.comment}`));
   else w.text('No significant observations recorded for this period.', { size: 9, color: MUTED });
 
-  w.section(`${++sectionNo}. Report information`);
-  w.facts([
-    { label: 'Generated', value: new Date().toLocaleString('en-GB') },
-    { label: 'Data period', value: `${periodLabel(period)} (${period.from} to ${period.to})` },
-    { label: 'Rule version', value: `Version ${rules?.version ?? 1} (current settings applied to every month, including closed months)` },
-    { label: 'Source', value: 'Submitted, under-review and approved lesson records only' },
-  ]);
-  w.text('Results describe recorded data only. Months without recorded lessons are reported as "No data" rather than estimated.', { size: 8, color: MUTED });
-
   paintChrome(doc, w, title);
   return { doc, filename: `${fileSafe(student.name)}-${fileSafe(student.code)}-${periodSlug(period)}-Follow-Up.pdf` };
 }
 
 /** Full individual student follow-up: every subject, every criterion, every month, plus raw lesson detail. */
-export async function downloadStudentPdf(input: Parameters<typeof buildStudentPdf>[0]) {
-  const { doc, filename } = await buildStudentPdf(input);
+export async function downloadStudentPdf(input: Parameters<typeof buildStudentPdf>[0] & { logoUrl?: string | null }) {
+  const { logoUrl, ...rest } = input;
+  const logoDataUrl = logoUrl ? await loadLogoDataUrl(logoUrl) : null;
+  const { doc, filename } = await buildStudentPdf({ ...rest, logoDataUrl });
   save(doc, filename);
 }
 
 /** Builds the class document without touching the DOM, so it can be unit tested or reused. */
 export async function buildClassSummaryPdf(input: {
   school: string; period: Period; closedMonths?: string[]; summaries: Summary[]; comparison?: SubjectComparison[]; rules: Rules; fileTag?: string;
+  logoDataUrl?: string | null;
 }): Promise<{ doc: Doc; filename: string }> {
-  const { school, period, closedMonths = [], summaries, comparison = [], rules } = input;
+  const { school, period, closedMonths = [], summaries, comparison = [], logoDataUrl = null } = input;
   const months = period.months;
   const doc = await newDoc('landscape');
   const w = new PdfWriter(doc);
   const title = `${school} — Class Follow-Up Summary`;
-  banner(w, school, 'CLASS ACADEMIC AND BEHAVIOURAL FOLLOW-UP SUMMARY');
+  banner(w, school, 'CLASS ACADEMIC AND BEHAVIOURAL FOLLOW-UP SUMMARY', logoDataUrl);
 
   const totals = summaries.reduce((acc, s) => {
     acc.lessons += s.lessons;
@@ -320,17 +363,12 @@ export async function buildClassSummaryPdf(input: {
   const attTotal = totals.present + totals.late + totals.absent;
 
   w.facts([
-    { label: 'Reporting period', value: `${periodLabel(period)} (${months.length} month${months.length === 1 ? '' : 's'})` },
-    { label: 'Period from', value: `${formatDate(period.from)} (${period.from})` },
-    { label: 'Period to', value: `${formatDate(period.to)} (${period.to})` },
+    { label: 'Reporting period', value: `${periodLabel(period)} (${period.from} to ${period.to})` },
     { label: 'Students covered', value: `${students} student${students === 1 ? '' : 's'}` },
     { label: 'Subject rows', value: `${summaries.length} student-subject summar${summaries.length === 1 ? 'y' : 'ies'}` },
     { label: 'Recorded lessons', value: `${totals.lessons} lesson report${totals.lessons === 1 ? '' : 's'}` },
     { label: 'Attendance', value: attTotal ? `${Math.round(((totals.present + totals.late) / attTotal) * 100)}% · ${totals.present} present, ${totals.late} late, ${totals.absent} absent` : 'No data' },
     { label: 'Performance mix', value: countText(totals.performance) },
-    { label: 'Closed months', value: closedMonths.length ? closedMonths.map(monthLabelShort).join(', ') + ' (current rules applied)' : 'None' },
-    { label: 'Rule version', value: `Version ${rules?.version ?? 1}` },
-    { label: 'Generated on', value: new Date().toLocaleString('en-GB') },
   ]);
 
   w.section('1. Student subject summary', 'Every recorded student-subject combination in the selected period.');
@@ -361,20 +399,14 @@ export async function buildClassSummaryPdf(input: {
       }), { fontSize: 7.5 });
   }
 
-  w.section(months.length > 1 ? '3' : '2', 'Report information');
-  w.facts([
-    { label: 'Generated', value: new Date().toLocaleString('en-GB') },
-    { label: 'Data period', value: `${periodLabel(period)} (${period.from} to ${period.to})` },
-    { label: 'Calculation', value: `Rule version ${rules?.version ?? 1}, applied to every month in the period` },
-  ]);
-  w.text('Totals are calculated strictly from submitted, under-review and approved lesson records. Months without recorded lessons appear as zero coverage rather than being estimated.', { size: 8, color: MUTED });
-
   paintChrome(doc, w, title);
   return { doc, filename: `${fileSafe(school)}-Class-Summary-${periodSlug(period)}.pdf` };
 }
 
 /** Whole-class / whole-cohort summary covering every student-subject row in the period. */
-export async function downloadClassSummaryPdf(input: Parameters<typeof buildClassSummaryPdf>[0]) {
-  const { doc, filename } = await buildClassSummaryPdf(input);
+export async function downloadClassSummaryPdf(input: Parameters<typeof buildClassSummaryPdf>[0] & { logoUrl?: string | null }) {
+  const { logoUrl, ...rest } = input;
+  const logoDataUrl = logoUrl ? await loadLogoDataUrl(logoUrl) : null;
+  const { doc, filename } = await buildClassSummaryPdf({ ...rest, logoDataUrl });
   save(doc, filename);
 }

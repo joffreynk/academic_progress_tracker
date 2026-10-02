@@ -94,7 +94,29 @@ test('pdf: student follow-up builds a valid multi-page PDF with all data', async
   assert.ok(/Academic performance/i.test(text), 'section 1 must be present');
   assert.ok(/lesson-level detail/i.test(text), 'raw observation section must be present');
   assert.ok(text.includes('2026-08-01'), 'individual lesson dates must be present, not just totals');
-  assert.ok(text.includes('Version 2'), 'calculation version must be present');
+  assert.ok(!/report information/i.test(text), 'the report information block must not be rendered');
+  assert.ok(!/calculation version/i.test(text), 'calculation version metadata must not be rendered');
+});
+
+test('pdf: student follow-up embeds the organization logo', async () => {
+  const period = buildPeriod('2026-08-31', '2026-09-30');
+  assert.ok(period, 'fixture period must parse');
+  const rows = fixture();
+  const { doc } = await buildStudentPdf({
+    school: 'Maarif International Schools',
+    period,
+    student: { id: 's1', name: 'Grace Mugisha', code: 'STU-003', className: 'Class 7A' },
+    subjects: groupReports(rows, RULES),
+    overall: summarize(rows, RULES),
+    raw: rows,
+    rules: RULES,
+    logoDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  });
+
+  const buf = Buffer.from(doc.output('arraybuffer') as ArrayBuffer);
+  assert.equal(header(buf), '%PDF-', 'output must be a real PDF header');
+  const text = pdfText(buf);
+  assert.ok(text.includes('Maarif International Schools'), 'organization name must appear in the document text');
 });
 
 test('pdf: class summary covers every student-subject row and lists every month', async () => {

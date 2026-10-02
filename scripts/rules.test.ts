@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { validLessonDate, dateMinus } from '../src/lib/security';
 import { summarize, groupReports, groupReportsByMonth, summarizeByMonth, resultTrend, calculateStudentTrends, buildNormalRecordDefaults, buildReportActivitySeries, type Observation } from '../src/lib/reporting';
 import { reviewTransition } from '../src/lib/review';
-import { normalizeTeacherAssignmentImportRow } from '../src/lib/importing';
+import { normalizeTeacherAssignmentImportRow, buildStudentImportRows, buildTeacherImportRows, gradeNameForClass, academicYearFromFileName, canonicalSubjectName, subjectKey, subjectCodeFor, placeholderTeacherEmail, parseCsvTable, safeCsvCell } from '../src/lib/importing';
 import {
   buildPeriod,
   dayBefore,
@@ -50,6 +50,128 @@ test('§import: teacher roster row with NO, NAME, SURNAME, EMAIL, SUBJECTS and C
     subjects: ['Mathematics', 'ICT'],
     classes: ['7A', '8A'],
   });
+});
+
+test('§import: grade and academic year are derived from the class name and file name', () => {
+  assert.equal(gradeNameForClass('7A'), 'Grade 7');
+  assert.equal(gradeNameForClass('9B'), 'Grade 9');
+  assert.equal(gradeNameForClass('10'), 'Grade 10');
+  assert.equal(gradeNameForClass('MP1'), 'MP');
+  assert.equal(gradeNameForClass('MP3'), 'MP');
+  assert.equal(academicYearFromFileName('List of students 2026-2027.xlsx'), '2026-2027');
+  assert.equal(academicYearFromFileName('students.xlsx'), '');
+});
+
+test('§import: student workbook rows are read from every sheet, including side-by-side class tables', () => {
+  const sheets = [
+    {
+      name: 'MP1',
+      rows: [
+        ['', '', '', ''],
+        ['No', 'Name', 'Surname', 'Year'],
+        ['1', 'Mayanja', 'Promise Kirster', 'MP1'],
+        ['2', 'Nahimana', 'Sada-Mahnoor', 'MP1'],
+      ],
+    },
+    {
+      name: 'Y7',
+      rows: [
+        ['No', 'Name', 'Surname', 'Year', '', '', '', 'No', 'Name', 'Surname', 'Year'],
+        ['1', 'Motala', 'Abdallah', '7A', '', '', '', '16', 'Azzo', 'Andrea', '7B'],
+      ],
+    },
+  ];
+
+  const parsed = buildStudentImportRows(sheets, '2026-2027');
+  assert.equal(parsed.rows.length, 4);
+  assert.deepEqual(parsed.headers, ['Student ID', 'Student Name', 'Grade', 'Class', 'Academic Year', 'Status']);
+  assert.deepEqual(parsed.rows.map((r) => r['Student ID']), ['2026-2027-MP1-1', '2026-2027-MP1-2', '2026-2027-7A-1', '2026-2027-7B-16']);
+  assert.equal(parsed.rows[0]['Student Name'], 'Mayanja Promise Kirster');
+  assert.equal(parsed.rows[0]['Grade'], 'MP');
+  assert.equal(parsed.rows[0]['Status'], '', 'no Status column means the row keeps its current status');
+  assert.equal(parsed.rows[2]['Grade'], 'Grade 7');
+  assert.equal(parsed.rows[2]['Class'], '7A');
+  assert.equal(parsed.rows[3]['Class'], '7B');
+  assert.equal(parsed.rows[3]['Academic Year'], '2026-2027');
+
+  // A Status column in the file is honoured, and a classless row on a non-class sheet is skipped with a note.
+  const withStatus = buildStudentImportRows(
+    [
+      {
+        name: 'Sheet1',
+        rows: [
+          ['No', 'Name', 'Surname', 'Year', 'Status'],
+          ['1', 'Ouma', 'Grace', '7A', 'inactive'],
+          ['2', 'Doe', 'John', '7B', 'ACTIVE'],
+          ['3', 'Kane', 'Ruth', '', 'ACTIVE'],
+        ],
+      },
+    ],
+    '2027-2028',
+  );
+  assert.equal(withStatus.rows.length, 2, 'a row with no class on a non-class sheet is skipped');
+  assert.equal(withStatus.rows[0]['Status'], 'INACTIVE');
+  assert.equal(withStatus.rows[1]['Status'], 'ACTIVE');
+  assert.ok(withStatus.notes.some((n) => n.includes('1 row(s) skipped')), 'skipped rows are reported');
+});
+
+test('§import: teacher roster rows are merged per teacher and gaps are reported in the notes', () => {
+  const table = [
+    ['', 'UPDATED LIST OF TEACHERS AND THEIR CONTACT DETAILS'],
+    ['NO', 'NAME', 'SURNAME', 'CONTACT DETAIL', 'NATIONALITY', 'EMAIL', 'SUBJECTS', 'CLASSES'],
+    ['1', ' SULAINAH ', 'NAKIBUUKA', '( +257)  65568897', 'UGANDAN', 'nakibuuka@school.org', 'MATHS', '5,6'],
+    ['1', ' SULAINAH ', 'NAKIBUUKA', '( +257)  65568897', 'UGANDAN', 'nakibuuka@school.org', 'GC', '7A'],
+    ['2', 'JAMES', 'MULWA NDOLO', '(+254)717662668', 'KENYAN', '', 'MATHS', '10,11'],
+    ['3', 'CATHERINE', 'KEMIGISA', '(+257) 61707007', 'UGANDAN', 'catherine@school.org', '', ''],
+  ];
+
+  const parsed = buildTeacherImportRows(table);
+  assert.equal(parsed.rows.length, 3);
+  assert.deepEqual(parsed.rows[0], {
+    'Teacher ID': '1',
+    'Teacher Name': 'SULAINAH NAKIBUUKA',
+    Email: 'nakibuuka@school.org',
+    'Contact Detail': '( +257)  65568897',
+    Nationality: 'UGANDAN',
+    Subjects: 'MATHS, GC',
+    Classes: '5, 6, 7A',
+  });
+  assert.equal(parsed.rows[1]['Email'], '');
+  assert.equal(parsed.rows[1]['Teacher Name'], 'JAMES MULWA NDOLO');
+  assert.ok(parsed.notes.some((n) => n.includes('JAMES MULWA NDOLO')), 'teacher without an email is reported');
+  assert.ok(parsed.notes.some((n) => n.includes('CATHERINE KEMIGISA')), 'teacher without subjects/classes is reported');
+});
+
+test('§import: subject codes map onto friendly names, unique codes and pending emails', () => {
+  assert.equal(canonicalSubjectName('MATHS'), 'Mathematics');
+  assert.equal(canonicalSubjectName('MTC'), 'Mathematics');
+  assert.equal(canonicalSubjectName('GC'), 'Global Citizenship');
+  assert.equal(canonicalSubjectName('EASL'), 'English');
+  assert.equal(canonicalSubjectName('Chemistry'), 'Chemistry');
+  assert.equal(subjectKey('Global Citizenship'), subjectKey('globalcitizenship'));
+
+  const used = new Set<string>();
+  assert.equal(subjectCodeFor('Math', used), 'MATH');
+  assert.equal(subjectCodeFor('Math', used), 'MATH2');
+
+  const email = placeholderTeacherEmail('3', 'JAMES MULWA NDOLO');
+  assert.equal(email, 'pending-3-james-mulwa-ndolo@placeholder.invalid');
+  assert.notEqual(placeholderTeacherEmail('4', 'JAMES MULWA NDOLO'), email);
+  assert.equal(
+    placeholderTeacherEmail('3', 'JAMES MULWA NDOLO', 'ORG-1'),
+    'pending-org-1-3-james-mulwa-ndolo@placeholder.invalid',
+    'pending emails carry the organization so two schools can never collide',
+  );
+});
+
+test('§import: CSV parsing is quote aware and CSV cells are guarded against formulas', () => {
+  const rows = parseCsvTable('Name,Comment\r\n"alice, a","says ""hi"""\r\n');
+  assert.deepEqual(rows, [
+    ['Name', 'Comment'],
+    ['alice, a', 'says "hi"'],
+  ]);
+  assert.equal(safeCsvCell('=SUM(A1)'), '"\'=SUM(A1)"');
+  assert.equal(safeCsvCell('7A'), '"7A"');
 });
 
 // §154 & §2: Critical 14-Day Date Rule

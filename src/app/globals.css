@@ -110,3 +110,87 @@ th.sortable:hover{background:#f0f4f5;color:#2c4154}
 .compare-pill.other{background:#eef2f4;color:#6c7a83}
 .compare-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px;font-size:10px;color:#8a99a3}
 .compare-legend span{display:inline-flex;align-items:center;gap:5px}
+
+/* =========================================================
+   Shell: centered content column, topbar parts, sidebar parts
+   ========================================================= */
+.main-content{flex:1;min-width:0;display:flex;flex-direction:column}
+.content-container{width:100%;max-width:1500px;margin:0 auto;padding:36px 44px 84px}
+.topbar-title{flex:1;min-width:0}
+.topbar-title h2{margin:0}
+.topbar-actions{display:flex;align-items:center;gap:10px}
+.menu-btn{display:none;align-items:center;justify-content:center;width:36px;height:36px;border:1px solid #dfe7eb;border-radius:9px;background:#fff;color:#426477;flex:none}
+.menu-btn:hover{background:#f2f7f7;border-color:#b4dfd8;color:#128477}
+.sidebar-nav{display:flex;flex-direction:column;gap:4px;padding:0 13px;flex:1;min-height:0;overflow-y:auto}
+.sidebar-brand-text{display:flex;flex-direction:column;gap:3px;color:#fff;min-width:0}
+.sidebar-brand-text strong{font-size:14.5px;line-height:1.15;letter-spacing:-.02em}
+.sidebar-brand-text span{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#8fb5bb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sidebar-user{margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:15px 18px 19px;border-top:1px solid #24475f}
+.user-info{display:flex;align-items:center;gap:9px;color:#cfe0e6;min-width:0}
+.user-info svg{flex:none;color:#7fc6bb}
+.user-info div{min-width:0}
+.user-info strong{display:block;font-size:12.5px;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.user-info small{display:block;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#8fb5bb}
+.sidebar-logo{width:35px;height:35px;object-fit:contain;background:#fff;border-radius:9px;padding:3px;flex:none}
+
+/* =========================================================
+   Stat cards (JSX uses .stat-grid/.stat-label/.stat-value)
+   ========================================================= */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:15px}
+.stat-label{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:#8597a4;margin-bottom:10px}
+.stat-value{font-family:Outfit,'DM Sans',sans-serif;font-size:31px;line-height:1.05;font-weight:700;color:#1f3d52;letter-spacing:-.03em}
+.stat-card>small{font-size:11px;color:#8b99a3;margin-top:6px}
+@media(max-width:620px){.stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-card{min-height:0;padding:15px 16px}.stat-value{font-size:25px}}
+
+/* =========================================================
+   Notice banners + toast popups (every operation result)
+   ========================================================= */
+.notice-banner{display:flex;align-items:flex-start;gap:9px;border-radius:10px;padding:13px 16px;font-size:12.5px;font-weight:600;line-height:1.45;border:1px solid transparent}
+.toast-stack{position:fixed;top:18px;right:18px;z-index:300;display:flex;flex-direction:column;gap:10px;width:min(430px,calc(100vw - 36px));pointer-events:none}
+.toast{pointer-events:auto;display:flex;align-items:flex-start;gap:10px;background:#fff;border:1px solid #e6ecee;border-left:4px solid var(--teal);border-radius:11px;padding:13px 15px;box-shadow:0 16px 40px rgba(15,42,60,.2);font-size:12.5px;font-weight:600;color:#2c4155;line-height:1.45;animation:toastIn .2s ease-out}
+.toast.error{border-left-color:#d4593a;background:#fffaf9;color:#7f3427}
+.toast.success{border-left-color:var(--teal)}
+.toast svg{flex:none;margin-top:1px}
+.toast.success svg{color:var(--teal)}
+.toast.error svg{color:#d4593a}
+.toast-close{margin-left:auto;flex:none;background:none;border:0;color:#9aa9b2;padding:0 0 0 8px;line-height:1}
+.toast-close:hover{color:#426477}
+@keyframes toastIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+@media(max-width:620px){.toast-stack{top:12px;right:12px;left:12px;width:auto}}
+
+/* =========================================================
+   Login screen: centered card
+   ========================================================= */
+.login-backdrop{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:30px 18px;background:linear-gradient(145deg,#17344c,#116b70 74%,#139385)}
+.login-backdrop .login-card{max-width:430px;padding:40px 36px 36px;border-radius:16px;box-shadow:0 26px 60px rgba(6,32,48,.34);animation:toastIn .25s ease-out}
+.login-brand{display:flex;flex-direction:column;align-items:center;text-align:center;gap:11px;margin-bottom:24px}
+.login-brand h1{margin:0;font-size:21px;line-height:1.3;color:#17344c}
+.login-brand p{margin:0;font-size:12px;color:#7b8b96;line-height:1.5}
+.login-logo{width:74px;height:74px;object-fit:contain;background:#fff;border:1px solid #e6ecee;border-radius:16px;padding:8px;box-shadow:0 8px 20px rgba(6,32,48,.14)}
+
+/* =========================================================
+   Loading screen
+   ========================================================= */
+.loading-screen{height:100vh;min-height:220px;display:grid;place-content:center;justify-items:center;gap:14px;background:var(--bg);color:#4e6e78;font-size:13px;font-weight:600}
+
+/* =========================================================
+   View panels: behaviour / data quality / statistics / sub
+   ========================================================= */
+.behaviour-panel,.data-quality-panel,.statistics-panel{margin-bottom:0}
+.sub-panel{background:#fff;border:1px solid #ebeff1;border-radius:11px;box-shadow:0 4px 16px #1c3c5010;padding:18px 20px}
+.empty-title{font-size:14px;font-weight:700;color:#31444d;margin-bottom:6px}
+.empty-detail{font-size:12.5px;color:#7b8b96;line-height:1.6}
+.modal-large{max-width:850px}
+.student-report-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.student-report-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.profile-tab-btn{padding:12px 16px;background:transparent;border:0;border-bottom:2px solid transparent;color:#748695;font-weight:700;font-size:12px;white-space:nowrap;cursor:pointer}
+.profile-tab-btn:hover{color:var(--teal)}
+.profile-tab-btn.active{color:var(--teal);border-bottom-color:var(--teal)}
+
+/* =========================================================
+   Responsive shell tweaks
+   ========================================================= */
+@media(max-width:850px){.menu-btn{display:inline-flex}.content-container{padding:24px 20px 76px}}
+
+/* Field hint under inputs (logo URL etc.) */
+.field-hint{font-size:10.5px;line-height:1.5;font-weight:600;color:#8b99a3;text-transform:none;letter-spacing:0}

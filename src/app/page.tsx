@@ -47,6 +47,9 @@ import PeriodPicker from '@/components/PeriodPicker';
 import { buildNormalRecordDefaults, resultTrend, type Observation, type Rules, type SubjectComparison } from '@/lib/reporting';
 import { thisMonthPeriod, buildPeriod, periodLabel, periodSlug, type Period } from '@/lib/period';
 import { downloadClassSummaryPdf } from '@/lib/reportPdf';
+import { importFields, requiredImportFields, safeCsvCell, toCsv, type ImportKind } from '@/lib/importing';
+import { readImageFile, LOGO_ACCEPT } from '@/lib/logo';
+import { readImportFile } from '@/lib/importFile';
 
 const TIMEZONE_OPTIONS = [
   'Africa/Bujumbura',
@@ -71,6 +74,107 @@ const TIMEZONE_OPTIONS = [
   'UTC',
 ];
 
+function ToastStack({
+  notice,
+  error,
+  onDismiss,
+}: {
+  notice: string | null;
+  error: string | null;
+  onDismiss: (kind: 'notice' | 'error') => void;
+}) {
+  if (!notice && !error) return null;
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {notice && (
+        <div className="toast success">
+          <CheckCircle2 size={17} />
+          <span>{notice}</span>
+          <button className="toast-close" onClick={() => onDismiss('notice')} aria-label="Dismiss notification">
+            <X size={15} />
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className="toast error">
+          <AlertTriangle size={17} />
+          <span>{error}</span>
+          <button className="toast-close" onClick={() => onDismiss('error')} aria-label="Dismiss error">
+            <X size={15} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LogoField({
+  value,
+  onChange,
+  onNotice,
+  onError,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onNotice: (m: string) => void;
+  onError: (m: string) => void;
+}) {
+  const uploaded = value.startsWith('data:');
+  return (
+    <>
+      <label>
+        Logo URL
+        <input
+          type="text"
+          placeholder={uploaded ? 'Uploaded image (stored)' : '/icons/school_logo.png or https://...'}
+          value={uploaded ? '' : value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <small className="field-hint">
+          {uploaded
+            ? 'Uploaded image stored with this organization only. Type a URL to replace it, or use Remove logo.'
+            : 'Optional: a full https:// image URL, or a site path such as /icons/school_logo.png.'}
+        </small>
+      </label>
+      <label>
+        Upload logo file
+        <input
+          type="file"
+          accept={LOGO_ACCEPT}
+          style={{ height: 'auto', padding: '10px 12px' }}
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (!file) return;
+            try {
+              const data = await readImageFile(file);
+              onChange(data);
+              onNotice(`Logo "${file.name}" loaded — save to apply it to this organization.`);
+            } catch (err: any) {
+              onError(err.message);
+            }
+          }}
+        />
+        <small className="field-hint">
+          PNG, JPG, WebP or SVG up to 200 KB. Each organization keeps its own logo; other organizations are unaffected.
+        </small>
+      </label>
+      {value && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <img
+            src={value}
+            alt="Logo preview"
+            style={{ width: 60, height: 60, objectFit: 'contain', border: '1px solid #e6ecee', borderRadius: 10, background: '#fff', padding: 5 }}
+          />
+          <button type="button" className="btn outline" onClick={() => onChange('')}>
+            Remove logo
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 type User = { id: string; name: string; role: string; organizationId: string | null };
 type Assignment = { id: string; classId: string; className: string; subjectId: string; subjectName: string; academicYearId: string; yearName: string; teacherName: string };
 type Student = { id: string; studentId: string; fullName: string; firstName?: string; lastName?: string; classId: string; gradeId: string; academicYearId: string; status: string; className: string };
@@ -86,6 +190,7 @@ type Ref = {
   minDate: string;
   windowDays: number;
   allowFutureDates?: boolean;
+  organization?: { name?: string; logoUrl?: string | null };
 };
 
 type Summary = {
@@ -112,23 +217,6 @@ type Summary = {
   observations: { date: string; comment: string; subject: string }[];
   version: number;
 };
-
-const importFields: Record<'students' | 'teachers' | 'assignments', string[]> = {
-  students: ['Student ID', 'Student Name', 'Grade', 'Class', 'Academic Year', 'Status'],
-  teachers: ['Teacher ID', 'Teacher Name', 'Email', 'Department'],
-  assignments: ['Teacher Email', 'Class', 'Subject', 'Academic Year', 'Active'],
-};
-
-const teacherRosterHeaderAliases = {
-  NO: ['NO', 'No', 'ID'],
-  NAME: ['NAME', 'Name', 'First Name'],
-  SURNAME: ['SURNAME', 'Surname', 'Last Name'],
-  CONTACT_DETAIL: ['CONTACT DETAIL', 'Contact Detail', 'CONTACT', 'Phone'],
-  NATIONALITY: ['NATIONALITY', 'Nationality', 'Country'],
-  EMAIL: ['EMAIL', 'Email'],
-  SUBJECTS: ['SUBJECTS', 'Subjects', 'Subject'],
-  CLASSES: ['CLASSES', 'Classes', 'Class'],
-} as const;
 
 const fieldMap: Record<string, { key: string; label: string; type?: string; options?: string; placeholder?: string }[]> = {
   year: [
@@ -244,6 +332,41 @@ const shiftDays = (date: string, days: number) => {
 
 const dayLabel = (days: number) => `${days} day${days === 1 ? '' : 's'}`;
 
+type GeneratedCredential = {
+  teacherId: string;
+  name: string;
+  email: string;
+  username: string;
+  password: string;
+  emailProvided: boolean;
+};
+
+const downloadTextFile = (name: string, content: string) => {
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  // Give the browser a moment to start the download before the blob is released.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+const downloadCredentials = (credentials: GeneratedCredential[]) =>
+  downloadTextFile(
+    `teacher-passwords-${new Date().toISOString().slice(0, 10)}.csv`,
+    toCsv(
+      ['Teacher ID', 'Name', 'Email', 'Username', 'Password', 'Email Status'],
+      credentials.map((c) => ({
+        'Teacher ID': c.teacherId,
+        Name: c.name,
+        Email: c.email,
+        Username: c.username,
+        Password: c.password,
+        'Email Status': c.emailProvided ? 'Provided' : 'PENDING - organization must supply a real email',
+      }))
+    )
+  );
+
 export default function Home() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [login, setLogin] = useState({ identifier: '', password: '' });
@@ -295,7 +418,7 @@ export default function Home() {
   const [form, setForm] = useState<Record<string, any>>({});
   const [config, setConfig] = useState<{ settings: any; closures: { month: string; closed: boolean }[]; organization: any } | null>(null);
   const [organizations, setOrganizations] = useState<{ id: string; name: string; code: string; domain: string | null; logoUrl: string | null; timezone: string; active: boolean; primaryAdminUserId: string | null; studentCount?: number; teacherCount?: number; classCount?: number }[]>([]);
-  const [orgForm, setOrgForm] = useState({ name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '', active: true });
+  const [orgForm, setOrgForm] = useState({ name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true });
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [mobile, setMobile] = useState(false);
 
@@ -313,17 +436,28 @@ export default function Home() {
   const [monthly, setMonthly] = useState<{ organization: string; period: Period; closedMonths: string[]; rules: Rules; summaries: Summary[]; comparison: SubjectComparison[]; raw: Observation[] } | null>(null);
 
   // Import state
-  const [importKind, setImportKind] = useState<'students' | 'teachers' | 'assignments'>('students');
+  const [importKind, setImportKind] = useState<ImportKind>('students');
   const [importRows, setImportRows] = useState<Record<string, string>[]>([]);
   const [importHeaders, setImportHeaders] = useState<string[]>([]);
+  const [importNotes, setImportNotes] = useState<string[]>([]);
   const [mapping, setMapping] = useState<Record<string, string>>({});
-  const [importResult, setImportResult] = useState<{ imported: number; updated: number; skipped: number; errors: { row: number; reason: string }[] } | null>(null);
+  const [importResult, setImportResult] = useState<{
+    imported: number;
+    updated: number;
+    skipped: number;
+    errors: { row: number; reason: string }[];
+    created?: { grades: number; classes: number; subjects: number; years: number };
+    assignments?: { created: number; updated: number };
+    credentials?: { teacherId: string; name: string; email: string; username: string; password: string; emailProvided: boolean }[];
+  } | null>(null);
   const [teacherSearch, setTeacherSearch] = useState('');
   const [teacherPage, setTeacherPage] = useState(0);
   const [teacherPageSize] = useState(10);
 
   // Modal state
   const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
+  const [logoOk, setLogoOk] = useState(true);
+  const [loginLogo, setLoginLogo] = useState<string | null>(null);
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -354,6 +488,36 @@ export default function Home() {
       .then((d) => setUser(d.user))
       .catch(() => setUser(null));
   }, []);
+
+  // Auto-dismiss operation result popups
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 7000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(null), 9000);
+    return () => clearTimeout(t);
+  }, [error]);
+
+  // Resolve the organization logo for the sign-in screen while the identifier is typed.
+  useEffect(() => {
+    if (user !== null) return;
+    const identity = login.identifier.trim();
+    const t = setTimeout(() => {
+      if (!identity) {
+        setLoginLogo(null);
+        return;
+      }
+      fetch(`/api/auth?identity=${encodeURIComponent(identity)}`)
+        .then((r) => r.json())
+        .then((d) => setLoginLogo(d?.logoUrl || null))
+        .catch(() => setLoginLogo(null));
+    }, identity ? 400 : 0);
+    return () => clearTimeout(t);
+  }, [login.identifier, user]);
 
   useEffect(() => {
     if (!user) return;
@@ -772,10 +936,12 @@ export default function Home() {
     const blob = new Blob([buffer as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
+    const fileName = `${monthly.organization.replace(/\s+/g, '_')}-${periodSlug(monthly.period)}-${fullClass ? 'Class-Report' : 'Subject-Report'}.xlsx`;
     a.href = url;
-    a.download = `${monthly.organization.replace(/\s+/g, '_')}-${periodSlug(monthly.period)}-${fullClass ? 'Class-Report' : 'Subject-Report'}.xlsx`;
+    a.download = fileName;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setNotice(`Excel workbook downloaded: ${fileName}`);
   };
 
   const exportMonthlyCsv = () => {
@@ -801,14 +967,30 @@ export default function Home() {
     const blob = new Blob([text], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
+    const fileName = `${monthly.organization.replace(/\s+/g, '_')}-${periodSlug(monthly.period)}-monthly.csv`;
     a.href = url;
-    a.download = `${monthly.organization.replace(/\s+/g, '_')}-${periodSlug(monthly.period)}-monthly.csv`;
+    a.download = fileName;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setNotice(`CSV export downloaded: ${fileName}`);
   };
 
   // CRUD Actions
+  const assignmentDisplay = (a: { teacherId: string; classId: string; subjectId: string; academicYearId: string }) => ({
+    teacher: ref?.teachers.find((t) => t.id === a.teacherId)?.name || 'Unknown teacher',
+    cls: ref?.classes.find((c) => c.id === a.classId)?.name || a.classId,
+    subject: ref?.subjects.find((s) => s.id === a.subjectId)?.name || a.subjectId,
+    year: ref?.years.find((y) => y.id === a.academicYearId)?.name || '—',
+  });
+
   const createEntity = () => {
+    const missing = (fieldMap[entity] || [])
+      .filter((f) => f.key !== 'department' && !String(form[f.key] ?? '').trim())
+      .map((f) => f.label);
+    if (missing.length) {
+      setError(`Complete ${missing.join(', ')} before creating.`);
+      return;
+    }
     run(async () => {
       await post('create', form, { type: entity });
       setForm({});
@@ -866,6 +1048,14 @@ export default function Home() {
         { key: 'gradeId', label: 'Grade', value: item.gradeId, options: ref?.grades.map((g) => ({ label: g.name, value: g.id })) },
         { key: 'academicYearId', label: 'Academic Year', value: item.academicYearId, options: ref?.years.map((y) => ({ label: y.name, value: y.id })) },
         { key: 'status', label: 'Status', value: item.status, options: [{ label: 'Active', value: 'ACTIVE' }, { label: 'Inactive', value: 'INACTIVE' }] },
+      ];
+    } else if (type === 'assignment') {
+      fields = [
+        { key: 'teacherId', label: 'Teacher', value: item.teacherId, options: (ref?.teachers || []).map((t) => ({ label: t.name, value: t.id })) },
+        { key: 'classId', label: 'Class', value: item.classId, options: (ref?.classes || []).map((c) => ({ label: c.name, value: c.id })) },
+        { key: 'subjectId', label: 'Subject', value: item.subjectId, options: (ref?.subjects || []).map((s) => ({ label: s.name, value: s.id })) },
+        { key: 'academicYearId', label: 'Academic Year', value: item.academicYearId, options: (ref?.years || []).map((y) => ({ label: y.name, value: y.id })) },
+        { key: 'active', label: 'Active assignment', type: 'checkbox', value: item.active !== false },
       ];
     }
 
@@ -981,9 +1171,18 @@ export default function Home() {
       <div className="login-backdrop">
         <div className="login-card">
           <div className="login-brand">
-            <GraduationCap size={36} color="#0f766e" />
-            <h1>International School Academic & Behavioural Reporting</h1>
-            <p>Unified Daily Lesson Capture & Deterministic Monthly Follow-Up</p>
+            {loginLogo || logoOk ? (
+              <img
+                className="login-logo"
+                src={loginLogo || '/icons/school_logo.png'}
+                alt="School logo"
+                onError={() => (loginLogo ? setLoginLogo(null) : setLogoOk(false))}
+              />
+            ) : (
+              <GraduationCap size={36} color="#0f766e" />
+            )}
+            <h1>Academic &amp; Behaviour reporting</h1>
+            <p>Unified Daily Lesson Capture &amp; Deterministic Monthly Follow-Up</p>
           </div>
           {error && <div className="notice-banner" style={{ background: '#fef2f2', color: '#991b1b', marginBottom: 16 }}>{error}</div>}
           <form onSubmit={doLogin} className="login-form">
@@ -1026,10 +1225,23 @@ export default function Home() {
       {/* SIDEBAR NAVIGATION */}
       <aside className={`sidebar ${mobile ? 'sidebar-open' : ''}`}>
         <div className="sidebar-brand">
-          <GraduationCap size={24} color="#0f766e" />
+          {ref?.organization?.logoUrl ? (
+            <img
+              className="sidebar-logo"
+              src={ref.organization.logoUrl}
+              alt=""
+              onError={(e) => {
+                e.currentTarget.style.display = 'none';
+              }}
+            />
+          ) : (
+            <div className="brand-mark">
+              <GraduationCap size={20} />
+            </div>
+          )}
           <div className="sidebar-brand-text">
             <strong>School Portal</strong>
-            <span>{overview?.organization || 'Academic Platform'}</span>
+            <span>{ref?.organization?.name || overview?.organization || 'Academic Platform'}</span>
           </div>
         </div>
 
@@ -1066,6 +1278,7 @@ export default function Home() {
           </button>
         </div>
       </aside>
+      {mobile && <div className="mobile-overlay" onClick={() => setMobile(false)} aria-hidden />}
 
       {/* MAIN CONTENT AREA */}
       <main className="main-content">
@@ -1082,24 +1295,26 @@ export default function Home() {
                 <Clock3 size={13} /> {overview.today}
               </span>
             )}
-            <button className="btn outline" onClick={refresh} title="Refresh Data" disabled={busy}>
+            <button className="btn outline"               onClick={() =>
+                run(async () => {
+                  await refresh();
+                  setNotice('Data refreshed.');
+                })
+              }
+              title="Refresh Data"
+              disabled={busy}>
               <RefreshCw size={14} className={busy ? 'spinning' : ''} />
             </button>
           </div>
         </header>
 
-        {notice && (
-          <div className="notice-banner" style={{ background: '#f0fdf4', color: '#166534', margin: '16px 24px 0' }}>
-            {notice}
-          </div>
-        )}
-        {error && (
-          <div className="notice-banner" style={{ background: '#fef2f2', color: '#991b1b', margin: '16px 24px 0' }}>
-            {error}
-          </div>
-        )}
+        <ToastStack
+          notice={notice}
+          error={error}
+          onDismiss={(kind) => (kind === 'notice' ? setNotice(null) : setError(null))}
+        />
 
-        <div className="content-container" style={{ padding: '20px 24px' }}>
+        <div className="content-container">
           {/* ================= PAGE: OVERVIEW ================= */}
           {page === 'overview' && overview && (
             <div>
@@ -2095,10 +2310,19 @@ export default function Home() {
                     </div>
                     {/* EXPORT BUTTONS (§57, §105) */}
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <button className="btn outline" onClick={() => downloadClassSummaryPdf({
-                        school: monthly.organization, period: monthly.period, closedMonths: monthly.closedMonths,
-                        summaries: monthly.summaries, comparison: monthly.comparison, rules: monthly.rules,
-                      })}>
+                      <button
+              className="btn outline"
+              onClick={() =>
+                run(async () => {
+                  await downloadClassSummaryPdf({
+                    school: monthly.organization, period: monthly.period, closedMonths: monthly.closedMonths,
+                    summaries: monthly.summaries, comparison: monthly.comparison, rules: monthly.rules,
+                    logoUrl: ref?.organization?.logoUrl || '/icons/school_logo.png',
+                  });
+                  setNotice('Class summary PDF downloaded.');
+                })
+              }
+            >
                         <Printer size={15} /> Print / PDF
                       </button>
                       <button className="btn outline" onClick={exportMonthlyCsv}>
@@ -2197,6 +2421,7 @@ export default function Home() {
                       period={monthly.period}
                       closedMonths={monthly.closedMonths}
                       school={monthly.organization}
+                      logoUrl={ref?.organization?.logoUrl || '/icons/school_logo.png'}
                       summaries={monthly.summaries}
                       comparison={monthly.comparison}
                       data={monthly.raw}
@@ -2281,7 +2506,18 @@ export default function Home() {
                       {f.options ? (
                         <select
                           value={form[f.key] || ''}
-                          onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            const next: Record<string, string> = { ...form, [f.key]: value };
+                            // Picking a class also selects the grade and academic year it belongs to.
+                            if (f.key === 'classId' && value) {
+                              const chosen = (ref as any)?.classes?.find((c: any) => c.id === value);
+                              const fields = fieldMap[entity] || [];
+                              if (chosen?.academicYearId && fields.some((x) => x.key === 'academicYearId')) next.academicYearId = chosen.academicYearId;
+                              if (chosen?.gradeId && fields.some((x) => x.key === 'gradeId')) next.gradeId = chosen.gradeId;
+                            }
+                            setForm(next);
+                          }}
                         >
                           <option value="">Select {f.label}</option>
                           {((ref as any)[f.options] || []).map((opt: any) => (
@@ -2320,11 +2556,14 @@ export default function Home() {
                       </tr>
                     </thead>
                     <tbody>
-                      {((ref as any)[`${entity}s`] || []).map((item: any) => (
+                      {((ref as any)[`${entity}s`] || []).map((item: any) => {
+                        const a = entity === 'assignment' ? assignmentDisplay(item) : null;
+                        return (
                         <tr key={item.id}>
                           <td>
-                            <strong>{item.name || item.fullName || item.email}</strong>
-                            {item.teacherId && <div style={{ fontSize: 11, color: '#748792' }}>ID: {item.teacherId}</div>}
+                            <strong>{a ? a.teacher : item.name || item.fullName || item.email}</strong>
+                            {a && <div style={{ fontSize: 11, color: '#748792' }}>{a.subject}</div>}
+                            {!a && item.teacherId && <div style={{ fontSize: 11, color: '#748792' }}>ID: {item.teacherId}</div>}
                             {item.code && <div style={{ fontSize: 11, color: '#748792' }}>Code: {item.code}</div>}
                           </td>
                           <td>
@@ -2333,10 +2572,11 @@ export default function Home() {
                             )}
                             {item.orderIndex !== undefined && <span>Order: {item.orderIndex}</span>}
                             {item.department && <span>Dept: {item.department}</span>}
-                            {item.gradeId && (
+                            {a && <span>Class: {a.cls} · Year: {a.year}</span>}
+                            {!a && item.gradeId && (
                               <span>Grade: {ref?.grades?.find((g) => g.id === item.gradeId)?.name || '—'}</span>
                             )}
-                            {item.classId && (
+                            {!a && item.classId && (
                               <span>Class: {ref?.classes?.find((c) => c.id === item.classId)?.name || '—'} · Subject: {ref?.subjects?.find((s) => s.id === item.subjectId)?.name || '—'}</span>
                             )}
                           </td>
@@ -2366,14 +2606,15 @@ export default function Home() {
                               <button
                                 className="btn outline"
                                 style={{ padding: '4px 8px', fontSize: 12, color: '#c67a53' }}
-                                onClick={() => initiateDeleteEntity(entity, item.id, item.name || item.email || entity)}
+                                onClick={() => initiateDeleteEntity(entity, item.id, a ? `${a.teacher} · ${a.subject} · ${a.cls}` : item.name || item.email || entity)}
                               >
                                 <Trash2 size={13} />
                               </button>
                             </div>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -2388,12 +2629,12 @@ export default function Home() {
                 <div>
                   <div className="eyebrow">BULK DATA ONBOARDING</div>
                   <h2>Import School Data from Spreadsheet</h2>
-                  <p>Batch import students, teacher accounts, and teaching assignments from CSV or XLSX.</p>
+                  <p>Batch import students and teacher accounts together with their teaching assignments from CSV or XLSX.</p>
                 </div>
               </div>
 
               <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                {(['students', 'teachers', 'assignments'] as const).map((k) => (
+                {(['students', 'teachers'] as const).map((k) => (
                   <button
                     key={k}
                     className={`btn ${importKind === k ? 'primary' : 'outline'}`}
@@ -2401,6 +2642,8 @@ export default function Home() {
                       setImportKind(k);
                       setImportRows([]);
                       setImportHeaders([]);
+                      setImportNotes([]);
+                      setImportResult(null);
                     }}
                   >
                     Import {pretty(k)}
@@ -2408,67 +2651,56 @@ export default function Home() {
                 ))}
               </div>
 
+              <p className="muted" style={{ fontSize: 12, marginBottom: 16 }}>
+                {importKind === 'students'
+                  ? 'Students workbook: every sheet with a No / Name / Surname / Year header row is read (including sheets with two class tables side by side). Missing grades, classes and the academic year are created automatically.'
+                  : 'Teacher workbook: title rows are skipped, teachers listed on several rows are merged, and SUBJECTS / CLASSES become teaching assignments. Missing subjects and classes are created automatically.'}
+              </p>
+
               <label style={{ display: 'block', marginBottom: 16 }}>
                 Choose File (.csv or .xlsx)
                 <input
                   type="file"
                   accept=".csv,.xlsx"
-                  onChange={async (e) => {
+                  onChange={(e) => {
                     const file = e.target.files?.[0];
+                    e.target.value = '';
                     if (!file) return;
                     run(async () => {
-                      const Excel = (await import('exceljs')).default;
-                      const book = new Excel.Workbook();
-                      const table: string[][] = [];
-                      if (file.name.endsWith('.csv')) {
-                        const text = await file.text();
-                        text.split(/\r?\n/).filter(Boolean).forEach((line) => {
-                          table.push(line.split(',').map((x) => x.trim().replace(/^"|"$/g, '')));
-                        });
-                      } else {
-                        await book.xlsx.load((await file.arrayBuffer()) as never);
-                        const sheet = book.worksheets[0];
-                        if (!sheet) throw Error('Workbook has no worksheet.');
-                        sheet.eachRow((row) =>
-                          table.push((row.values as ExcelJS.CellValue[]).slice(1).map((v) => String(v ?? '')))
-                        );
-                      }
-                      if (table.length < 2) throw Error('File must include a header row and at least one data row.');
-                      const headers = table[0].map((h) => h.trim());
-                      setImportHeaders(headers);
-                      setMapping(
-                        Object.fromEntries(
-                          importFields[importKind].map((k) => [
-                            k,
-                            headers.find((h) => h.toLowerCase() === k.toLowerCase()) || '',
-                          ])
-                        )
-                      );
-                      setImportRows(
-                        table.slice(1).map((row) => Object.fromEntries(headers.map((h, i) => [h, row[i]?.trim() || ''])))
-                      );
+                      const parsed = await readImportFile(file, importKind);
+                      setImportHeaders(parsed.headers);
+                      setImportNotes(parsed.notes);
+                      setMapping(Object.fromEntries(importFields[importKind].map((k) => [k, parsed.headers.includes(k) ? k : ''])));
+                      setImportRows(parsed.rows);
                       setImportResult(null);
                     });
                   }}
                 />
               </label>
 
+              {importNotes.length > 0 && (
+                <ul style={{ margin: '0 0 16px', paddingLeft: 18, fontSize: 12, color: '#475569' }}>
+                  {importNotes.map((note, i) => (
+                    <li key={i}>{note}</li>
+                  ))}
+                </ul>
+              )}
+
               {importHeaders.length > 0 && (
                 <div style={{ marginTop: 16 }}>
-                  <h4>Map Columns ({importRows.length} Rows Detected)</h4>
+                  <h4>Columns Detected ({importRows.length} Rows)</h4>
+                  <p className="muted" style={{ fontSize: 12 }}>
+                    Columns are matched automatically to the import format below. Nothing to map by hand.
+                  </p>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, margin: '12px 0' }}>
                     {importFields[importKind].map((k) => (
                       <label key={k}>
                         {k}
-                        <select
-                          value={mapping[k] || ''}
-                          onChange={(e) => setMapping({ ...mapping, [k]: e.target.value })}
-                        >
-                          <option value="">Select column</option>
-                          {importHeaders.map((h) => (
-                            <option key={h} value={h}>{h}</option>
-                          ))}
-                        </select>
+                        <input
+                          readOnly
+                          value={mapping[k] || '—'}
+                          style={{ background: '#f1f5f9', color: '#334155', cursor: 'default' }}
+                        />
                       </label>
                     ))}
                   </div>
@@ -2495,6 +2727,11 @@ export default function Home() {
                     <button
                       className="btn primary"
                       onClick={() => {
+                        const missing = requiredImportFields[importKind].filter((k) => !mapping[k]);
+                        if (missing.length) {
+                          setError(`Map the required column(s) first: ${missing.join(', ')}.`);
+                          return;
+                        }
                         setModalConfig({
                           type: 'confirm',
                           title: 'Confirm Bulk Import',
@@ -2507,7 +2744,10 @@ export default function Home() {
                               );
                               const res = await post('import', { kind: importKind, rows });
                               setImportResult(res);
-                              setNotice(`Import finished: ${res.imported} imported, ${res.updated} updated, ${res.skipped} skipped.`);
+                              const parts = [`${res.imported} imported`, `${res.updated} updated`, `${res.skipped} errors`];
+                              if (res.credentials?.length) parts.push(`${res.credentials.length} passwords generated and downloaded as teacher-passwords CSV`);
+                              setNotice(`Import finished: ${parts.join(', ')}.`);
+                              if (res.credentials?.length) downloadCredentials(res.credentials);
                               await refresh();
                             });
                           },
@@ -2528,21 +2768,83 @@ export default function Home() {
                   <h4>Import Results</h4>
                   <p>
                     Imported: <strong>{importResult.imported}</strong> · Updated: <strong>{importResult.updated}</strong> · Errors: <strong>{importResult.skipped}</strong>
+                    {importResult.assignments ? (
+                      <>
+                        {' '}· Assignments: <strong>{importResult.assignments.created}</strong> new, <strong>{importResult.assignments.updated}</strong> reactivated
+                      </>
+                    ) : null}
                   </p>
+                  {importResult.created && (
+                    <p style={{ fontSize: 13 }}>
+                      Created automatically:{' '}
+                      {[
+                        importResult.created.years ? `${importResult.created.years} academic year(s)` : '',
+                        importResult.created.grades ? `${importResult.created.grades} grade(s)` : '',
+                        importResult.created.classes ? `${importResult.created.classes} class(es)` : '',
+                        importResult.created.subjects ? `${importResult.created.subjects} subject(s)` : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ') || 'nothing new, everything already existed.'}
+                    </p>
+                  )}
+                  {importResult.credentials && importResult.credentials.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ fontSize: 13 }}>
+                        <strong>{importResult.credentials.length}</strong> teacher account(s) created. The teacher passwords CSV was
+                        downloaded automatically — distribute it securely and delete it afterwards.
+                      </p>
+                      {importResult.credentials.some((c) => !c.emailProvided) && (
+                        <p style={{ fontSize: 13, color: '#c67a53' }}>
+                          Pending emails (sign in with the username until the organization supplies a real address):{' '}
+                          {importResult.credentials
+                            .filter((c) => !c.emailProvided)
+                            .map((c) => c.name)
+                            .join(', ')}
+                        </p>
+                      )}
+                      <button
+                        className="btn outline"
+                        style={{ marginBottom: 12 }}
+                        onClick={() => downloadCredentials(importResult.credentials!)}
+                      >
+                        <Download size={15} /> Download Passwords CSV
+                      </button>
+                      <div className="table-scroll" style={{ maxHeight: 200 }}>
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Name</th>
+                              <th>Username</th>
+                              <th>Email</th>
+                              <th>Password</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {importResult.credentials.map((c, i) => (
+                              <tr key={i}>
+                                <td>{c.name}</td>
+                                <td>{c.username}</td>
+                                <td>
+                                  {c.email}
+                                  {!c.emailProvided ? ' (pending)' : ''}
+                                </td>
+                                <td>{c.password}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                   {importResult.errors.length > 0 && (
                     <>
                       <button
                         className="btn outline"
                         style={{ marginBottom: 12 }}
                         onClick={() => {
-                          const csv = ['Row,Reason', ...importResult.errors.map((e) => `${e.row},"${e.reason.replaceAll('"', '""')}"`)].join('\r\n');
-                          const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = 'import-errors.csv';
-                          a.click();
-                          URL.revokeObjectURL(url);
+                          const csv = ['Row,Reason', ...importResult.errors.map((e) => `${e.row},${safeCsvCell(e.reason)}`)].join('\r\n');
+                          downloadTextFile('import-errors.csv', csv);
+                          setNotice('Error CSV downloaded: import-errors.csv');
                         }}
                       >
                         <Download size={15} /> Download Error CSV
@@ -2588,7 +2890,12 @@ export default function Home() {
                   <label>Code<input value={orgForm.code} onChange={(e) => setOrgForm({ ...orgForm, code: e.target.value })} /></label>
                   <label>Timezone<input value={orgForm.timezone} onChange={(e) => setOrgForm({ ...orgForm, timezone: e.target.value })} /></label>
                   <label>Domain<input value={orgForm.domain} onChange={(e) => setOrgForm({ ...orgForm, domain: e.target.value })} /></label>
-                  <label>Logo URL<input value={orgForm.logoUrl} onChange={(e) => setOrgForm({ ...orgForm, logoUrl: e.target.value })} /></label>
+                  <LogoField
+                    value={orgForm.logoUrl}
+                    onChange={(v) => setOrgForm({ ...orgForm, logoUrl: v })}
+                    onNotice={setNotice}
+                    onError={setError}
+                  />
                   <label style={{ justifyContent: 'center' }}>
                     <span>Active</span>
                     <input type="checkbox" checked={orgForm.active} onChange={(e) => setOrgForm({ ...orgForm, active: e.target.checked })} style={{ width: 18, height: 18 }} />
@@ -2599,7 +2906,7 @@ export default function Home() {
                     const payload = { ...orgForm, id: undefined as string | undefined };
                     await post('organization', payload);
                     setNotice('Organization saved successfully.');
-                    setOrgForm({ name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '', active: true });
+                    setOrgForm({ name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true });
                     const res = await api('organizations');
                     setOrganizations(res.organizations);
                   })}>Create Organization</button>
@@ -2716,20 +3023,17 @@ export default function Home() {
                       }
                     />
                   </label>
-                  <label>
-                    Logo URL
-                    <input
-                      type="text"
-                      placeholder="https://..."
-                      value={config.organization.logoUrl || ''}
-                      onChange={(e) =>
-                        setConfig({
-                          ...config,
-                          organization: { ...config.organization, logoUrl: e.target.value },
-                        })
-                      }
-                    />
-                  </label>
+                  <LogoField
+                    value={config.organization.logoUrl || ''}
+                    onChange={(v) =>
+                      setConfig({
+                        ...config,
+                        organization: { ...config.organization, logoUrl: v },
+                      })
+                    }
+                    onNotice={setNotice}
+                    onError={setError}
+                  />
                   <label>
                     School Timezone
                     <input

@@ -6,9 +6,14 @@ import fs from 'fs';
 import path from 'path';
 
 function getD1Binding(): any {
-  const d1 = (globalThis as any).DB ?? (process.env as any).DB;
-  if (d1 && typeof d1 === 'object' && typeof d1.prepare === 'function') {
-    return d1;
+  // Cloudflare bindings are objects, so they are not copied into process.env by the
+  // OpenNext runtime. Read the request context first, then the usual globals.
+  const context = (globalThis as any)[Symbol.for('__cloudflare-context__')];
+  const candidates = [(globalThis as any).DB, context?.env?.DB, (process.env as any).DB];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === 'object' && typeof candidate.prepare === 'function') {
+      return candidate;
+    }
   }
   return null;
 }
@@ -56,5 +61,13 @@ export const db: LibSQLDatabase<typeof schema> = new Proxy({} as any, {
     return typeof value === 'function' ? value.bind(instance) : value;
   },
 });
+
+// D1 rejects `begin`, so interactive transactions are unavailable on Cloudflare.
+// There we run the callback statements in order against the same connection
+// (atomic on local SQLite via db.transaction); callers must tolerate a mid-way failure.
+export async function runTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
+  if (getD1Binding()) return fn(db as any);
+  return (db as any).transaction(fn);
+}
 
 export * from './schema';

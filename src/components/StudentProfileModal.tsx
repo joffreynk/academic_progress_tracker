@@ -54,6 +54,7 @@ export default function StudentProfileModal({
 
   useEffect(() => {
     if (activeTab === 'trends' && trends.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- loading flag for the trends fetch
       setLoadingTrends(true);
       api('trends', { studentId: data.student.id })
         .then((res) => {

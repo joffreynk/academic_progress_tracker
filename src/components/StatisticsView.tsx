@@ -1,5 +1,5 @@
 'use client';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Download, BarChart3, TrendingUp, Users, CheckCircle } from 'lucide-react';
 import { buildReportActivitySeries, type Observation, type Rules } from '@/lib/reporting';
 
@@ -38,7 +38,9 @@ export default function StatisticsView({
   summaries: Summary[];
   rawObservations: Observation[];
 }) {
-  const [filters, setFilters] = useState({ academicYear: '', term: '', grade: '', classId: '', subject: '', teacher: '' });
+  const [filters, setFilters] = useState({ academicYear: '', term: '', grade: '', classId: '', subject: '', teacher: '' })
+const [msg, setMsg] = useState<string | null>(null);
+useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 7000); return () => clearTimeout(t); }, [msg]);;
 
   const filteredObservations = useMemo(() => {
     return rawObservations.filter((row) => {
@@ -182,10 +184,12 @@ export default function StatisticsView({
     const blob = new Blob([buffer as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
+    const fileName = `${school.replace(/\s+/g, '_')}-${fileTag}-Statistics.xlsx`;
     a.href = url;
-    a.download = `${school.replace(/\s+/g, '_')}-${fileTag}-Statistics.xlsx`;
+    a.download = fileName;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMsg(`Analytics workbook downloaded: ${fileName}`);
   };
 
   const exportStatisticsCSV = () => {
@@ -200,10 +204,12 @@ export default function StatisticsView({
     const blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
+    const fileName = `${school.replace(/\s+/g, '_')}-${fileTag}-Statistics.csv`;
     a.href = url;
-    a.download = `${school.replace(/\s+/g, '_')}-${fileTag}-Statistics.csv`;
+    a.download = fileName;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMsg(`Statistics CSV downloaded: ${fileName}`);
   };
 
   const formatCsvSection = (title: string, obj: Record<string, number>) => {
@@ -219,6 +225,7 @@ export default function StatisticsView({
 
   return (
     <div className="panel statistics-panel">
+      {msg && <div className="notice-banner" style={{ background: '#f0fdf4', color: '#166534', marginBottom: 16, borderColor: '#d3f2e0' }}>{msg}</div>}
       <div className="list-toolbar">
         <div>
           <div className="eyebrow">{school.toUpperCase()} · STATISTICAL INTELLIGENCE</div>

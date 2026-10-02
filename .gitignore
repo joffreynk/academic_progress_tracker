@@ -39,6 +39,11 @@ logins.txt
 .kilo
 .open-next
 
+# spreadsheets (source lists and generated import files stay local)
+*.xlsx
+~$*
+teacher-passwords-2026-10-01.csv
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

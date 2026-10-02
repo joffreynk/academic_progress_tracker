@@ -1,4 +1,4 @@
-import { db } from '@/db';
+import { db, runTransaction } from '@/db';
 import { assignments, classes, subjects, academicYears, terms, students, lessons, records, monthClosures } from '@/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -36,7 +36,7 @@ for(const r of data.records) {
  if(existing && existing.id!==data.id) throw new AppError(`A report for this class, subject and date already exists. Open existing report: ${existing.id}`,409);
  if(data.id && (!existing || existing.id!==data.id)) throw new AppError('Report not found.',404);
  if(existing && !['DRAFT','RETURNED'].includes(existing.status)) throw new AppError('This report cannot be edited.',403);
- const result=await db.transaction(async tx=>{
+ const result=await runTransaction(async tx=>{
   const [lesson]=existing ? await tx.update(lessons).set({topic:data.topic.trim(),status:data.submit?'SUBMITTED':'DRAFT',termId:term.id,updatedAt:new Date(),submittedAt:data.submit?new Date():null,reviewComment:data.submit?null:existing.reviewComment}).where(eq(lessons.id,existing.id)).returning() : await tx.insert(lessons).values({organizationId:org.id,teacherId:teacher.id,classId:klass.id,subjectId:subject.id,academicYearId:year.id,termId:term.id,classNameSnapshot:klass.name,subjectNameSnapshot:subject.name,teacherNameSnapshot:teacher.name,academicYearNameSnapshot:year.name,lessonDate:data.lessonDate,topic:data.topic.trim(),status:data.submit?'SUBMITTED':'DRAFT',submittedAt:data.submit?new Date():null}).returning();
 for(const r of data.records){
     const absent=r.attendanceStatus==='ABSENT';

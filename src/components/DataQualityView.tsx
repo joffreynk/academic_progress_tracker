@@ -68,6 +68,7 @@ export default function DataQualityView({
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loading flag for a fetch triggered by the date range
     loadData(range);
   }, [range]);
 

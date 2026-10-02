@@ -1,5 +1,5 @@
 'use client';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowRight, ArrowUp, Download, Printer } from 'lucide-react';
 import type ExcelJS from 'exceljs';
 import { resultTrend, summarize, summarizeByMonth, type Observation, type Rules, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
@@ -94,8 +94,10 @@ function ComparisonTable({ title, months, rows, closedMonths }: { title: string;
   );
 }
 
-export default function MonthlyOverview({ period, closedMonths = [], school, summaries, comparison = [], data = [], rules }:{period:Period;closedMonths?:string[];school:string;summaries:Summary[];comparison?:SubjectComparison[];data?:Observation[];rules:Rules}){
+export default function MonthlyOverview({ period, closedMonths = [], school, logoUrl = null, summaries, comparison = [], data = [], rules }:{period:Period;closedMonths?:string[];school:string;logoUrl?:string|null;summaries:Summary[];comparison?:SubjectComparison[];data?:Observation[];rules:Rules}){
   const [student,setStudent]=useState('');const [search,setSearch]=useState('');
+const [msg,setMsg]=useState<string|null>(null);
+useEffect(()=>{if(!msg)return;const t=setTimeout(()=>setMsg(null),7000);return()=>clearTimeout(t);},[msg]);
   const label=periodLabel(period);
   const names=useMemo(()=>[...new Map(summaries.map(s=>[s.studentId,{id:s.studentId,name:s.studentName,code:s.studentCode,className:s.className}])).values()], [summaries]);
   const selected=student?names.find(n=>n.id===student):undefined;
@@ -154,10 +156,12 @@ const exportStudentMonthly = async () => {
    const url = URL.createObjectURL(blob);
    const a = document.createElement('a');
    a.href = url;
-   a.download = `${selected.name.replace(/\s+/g, '_')}-${periodSlug(period)}-Follow-Up.xlsx`;
-   a.click();
-   setTimeout(() => URL.revokeObjectURL(url), 1000);
- };
+    const fileName=`${selected.name.replace(/\s+/g, '_')}-${periodSlug(period)}-Follow-Up.xlsx`;
+    a.download = fileName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMsg(`Excel workbook downloaded: ${fileName}`);
+  };
 
   const exportSubjectMonthly = async (subjectName: string) => {
     if (!selected) return;
@@ -207,21 +211,25 @@ const exportStudentMonthly = async () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${selected.name.replace(/\s+/g, '_')}-${subjectName.replace(/\s+/g, '_')}-${periodSlug(period)}-Subject-Report.xlsx`;
+    const fileName=`${selected.name.replace(/\s+/g, '_')}-${subjectName.replace(/\s+/g, '_')}-${periodSlug(period)}-Subject-Report.xlsx`;
+    a.download = fileName;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMsg(`${subjectName} workbook downloaded: ${fileName}`);
   };
 
   const printStudentPdf = async () => {
     if (!selected) return;
     await downloadStudentPdf({
       school, period, closedMonths, student: { id: selected.id, name: selected.name, code: selected.code, className: selected.className },
-      subjects, overall, comparable, overallMonths, raw: studentRows, rules,
+      subjects, overall, comparable, overallMonths, raw: studentRows, rules, logoUrl,
     });
+    setMsg('Student follow-up PDF downloaded.');
   };
 
 
  return <section className="panel monthly-extra" aria-label="Reporting period details">
+   {msg&&<div className="notice-banner" style={{background:'#f0fdf4',color:'#166534',marginBottom:16,borderColor:'#d3f2e0'}}>{msg}</div>}
    <div className="list-toolbar"><div><h2>Report perspectives</h2><p>{school} · {label} · {all.lessons} recorded lesson reports · {names.length} students covered · {data.length} student observations</p></div></div>
    <div className="monthly-overview-grid"><div className="metric"><span>Attendance</span><strong>{all.attendanceRate===null?'No data':`${all.attendanceRate}%`}</strong><small>{countText(all.attendance)} · {data.length} observations</small></div><div className="metric"><span>Performance distribution</span><strong>{Object.values(all.performance).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.performance)}</small></div><div className="metric"><span>Participation</span><strong>{Object.values(all.participation).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.participation)}</small></div><div className="metric"><span>Homework</span><strong>{Object.values(all.homework).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.homework)}</small></div></div>
    <div className="monthly-extra-controls"><label>Search student, ID, class or subject<input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search report rows" /></label><label>Full student period report<select value={student} onChange={e=>setStudent(e.target.value)}><option value="">Choose a student</option>{names.map(n=><option key={n.id} value={n.id}>{n.name} · {n.code}</option>)}</select></label></div>
