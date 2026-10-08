@@ -2,6 +2,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Download, BarChart3, TrendingUp, Users, CheckCircle } from 'lucide-react';
 import { buildReportActivitySeries, type Observation, type Rules } from '@/lib/reporting';
+import { punctualityLabels } from '@/lib/monthly';
+
+const punctualityLabel = (key: string) => punctualityLabels[key as keyof typeof punctualityLabels] ?? key.replaceAll('_', ' ');
 
 interface Summary {
   studentId: string;
@@ -11,13 +14,11 @@ interface Summary {
   subjectName: string;
   teacherName?: string;
   lessons: number;
-  attendance: Record<string, number>;
   performance: Record<string, number>;
   participation: Record<string, number>;
   homework: Record<string, number>;
   conduct: Record<string, number>;
   punctuality: Record<string, number>;
-  attendanceRate: number | null;
   performanceResult: string;
   participationResult: string;
   homeworkResult: string;
@@ -38,17 +39,16 @@ export default function StatisticsView({
   summaries: Summary[];
   rawObservations: Observation[];
 }) {
-  const [filters, setFilters] = useState({ academicYear: '', term: '', grade: '', classId: '', subject: '', teacher: '' })
+  const [filters, setFilters] = useState({ classId: '', subject: '', teacher: '' })
 const [msg, setMsg] = useState<string | null>(null);
 useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 7000); return () => clearTimeout(t); }, [msg]);;
 
   const filteredObservations = useMemo(() => {
     return rawObservations.filter((row) => {
-      const matchesAcademicYear = !filters.academicYear || row.lessonId.includes(filters.academicYear) || true;
       const matchesClass = !filters.classId || row.className === filters.classId;
       const matchesSubject = !filters.subject || row.subjectName === filters.subject;
       const matchesTeacher = !filters.teacher || (row.teacherName || '') === filters.teacher;
-      return matchesAcademicYear && matchesClass && matchesSubject && matchesTeacher;
+      return matchesClass && matchesSubject && matchesTeacher;
     });
   }, [filters, rawObservations]);
 
@@ -78,28 +78,26 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
       return counts;
     };
 
-    const attendance = tally('attendance');
     const performance = tally('performance');
     const participation = tally('participation');
     const homework = tally('homework');
     const conduct = tally('conduct');
     const punctuality = tally('punctuality');
 
-    const attended = (attendance.PRESENT || 0) + (attendance.LATE || 0);
-    const attendanceTotal = attended + (attendance.ABSENT || 0);
-    const overallAttendanceRate = attendanceTotal > 0 ? Math.round((attended / attendanceTotal) * 100) : 0;
+    const punctualityTotal = Object.values(punctuality).reduce((a, b) => a + b, 0);
+    const punctualityOnTime = (punctuality.ALWAYS_ON_TIME || 0) + (punctuality.USUALLY_ON_TIME || 0);
 
     return {
       totalObs,
       lessonsCount,
       studentsCovered,
-      attendance,
       performance,
       participation,
       homework,
       conduct,
       punctuality,
-      overallAttendanceRate,
+      punctualityTotal,
+      punctualityOnTime,
       reportActivity: buildReportActivitySeries(filteredObservations),
     };
   }, [filteredObservations]);
@@ -114,7 +112,6 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
     sheet1.addRow(['SCHOOL-WIDE ACADEMIC & BEHAVIOURAL STATISTICS']);
     sheet1.addRow([school, `Reporting Period: ${period}`]);
     sheet1.addRow(['Total Lessons', stats.lessonsCount, 'Total Observations', stats.totalObs, 'Students Covered', stats.studentsCovered]);
-    sheet1.addRow(['Overall Attendance Rate', `${stats.overallAttendanceRate}%`]);
     sheet1.addRow([]);
 
     sheet1.addRow(['1. ACADEMIC PERFORMANCE DISTRIBUTION']);
@@ -125,11 +122,11 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
     });
     sheet1.addRow([]);
 
-    sheet1.addRow(['2. ATTENDANCE DISTRIBUTION']);
-    sheet1.addRow(['Status', 'Observation Count', 'Percentage']);
-    const attTotal = Object.values(stats.attendance).reduce((a, b) => a + b, 0);
-    Object.entries(stats.attendance).forEach(([status, count]) => {
-      sheet1.addRow([status, count, attTotal ? `${Math.round((count / attTotal) * 100)}%` : '0%']);
+    sheet1.addRow(['2. PUNCTUALITY DISTRIBUTION']);
+    sheet1.addRow(['Category', 'Observation Count', 'Percentage']);
+    const puncTotal = Object.values(stats.punctuality).reduce((a, b) => a + b, 0);
+    Object.entries(stats.punctuality).forEach(([lvl, count]) => {
+      sheet1.addRow([punctualityLabel(lvl), count, puncTotal ? `${Math.round((count / puncTotal) * 100)}%` : '0%']);
     });
     sheet1.addRow([]);
 
@@ -162,7 +159,7 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
 
     // Sheet 2: Student Summaries
     const sheet2 = book.addWorksheet('Student-Subject Summaries');
-    sheet2.addRow(['Student ID', 'Student Name', 'Class', 'Subject', 'Teacher', 'Lessons', 'Attendance %', 'Performance Result', 'Participation Result', 'Homework Result', 'Conduct Result']);
+    sheet2.addRow(['Student ID', 'Student Name', 'Class', 'Subject', 'Teacher', 'Lessons', 'Punctuality', 'Performance Result', 'Participation Result', 'Homework Result', 'Conduct Result']);
     filteredSummaries.forEach((s) => {
       sheet2.addRow([
         s.studentCode,
@@ -171,7 +168,7 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
         s.subjectName,
         s.teacherName || '—',
         s.lessons,
-        s.attendanceRate !== null ? `${s.attendanceRate}%` : '—',
+        s.punctualityResult,
         s.performanceResult.replace('_', ' '),
         s.participationResult,
         s.homeworkResult,
@@ -196,7 +193,7 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
     const lines = [
       'Category,Item,Observation Count,Percentage',
       ...formatCsvSection('Performance', stats.performance),
-      ...formatCsvSection('Attendance', stats.attendance),
+      ...formatCsvSection('Punctuality', stats.punctuality),
       ...formatCsvSection('Participation', stats.participation),
       ...formatCsvSection('Homework', stats.homework),
       ...formatCsvSection('Conduct', stats.conduct),
@@ -245,9 +242,6 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 20 }}>
-        <label>Academic Year<select value={filters.academicYear} onChange={(e) => setFilters({ ...filters, academicYear: e.target.value })}><option value="">All years</option><option value="2026-2027">2026-2027</option></select></label>
-        <label>Term<select value={filters.term} onChange={(e) => setFilters({ ...filters, term: e.target.value })}><option value="">All terms</option><option value="Term 1">Term 1</option><option value="Term 2">Term 2</option></select></label>
-        <label>Grade<select value={filters.grade} onChange={(e) => setFilters({ ...filters, grade: e.target.value })}><option value="">All grades</option><option value="Grade 7">Grade 7</option><option value="Grade 8">Grade 8</option></select></label>
         <label>Class<select value={filters.classId} onChange={(e) => setFilters({ ...filters, classId: e.target.value })}><option value="">All classes</option>{uniqueClasses.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
         <label>Subject<select value={filters.subject} onChange={(e) => setFilters({ ...filters, subject: e.target.value })}><option value="">All subjects</option>{uniqueSubjects.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
         <label>Teacher<select value={filters.teacher} onChange={(e) => setFilters({ ...filters, teacher: e.target.value })}><option value="">All teachers</option>{uniqueTeachers.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
@@ -256,11 +250,11 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
       {/* Top Highlights */}
       <div className="stat-grid" style={{ marginBottom: 24 }}>
         <div className="stat-card">
-          <div className="stat-label">School-wide Attendance</div>
-          <div className="stat-value" style={{ color: stats.overallAttendanceRate >= 85 ? '#22a57d' : '#c67a53' }}>
-            {stats.overallAttendanceRate}%
+          <div className="stat-label">School-wide Punctuality</div>
+          <div className="stat-value" style={{ color: stats.punctualityTotal && stats.punctualityOnTime / stats.punctualityTotal >= 0.85 ? '#22a57d' : '#c67a53' }}>
+            {stats.punctualityTotal ? `${Math.round((stats.punctualityOnTime / stats.punctualityTotal) * 100)}%` : '—'}
           </div>
-          <small style={{ color: '#748792' }}>{(stats.attendance.PRESENT || 0) + (stats.attendance.LATE || 0)} attended of {Object.values(stats.attendance).reduce((a, b) => a + b, 0)} total</small>
+          <small style={{ color: '#748792' }}>{stats.punctualityOnTime} of {stats.punctualityTotal} evaluations on time</small>
         </div>
         <div className="stat-card">
           <div className="stat-label">Active Student Evaluations</div>
@@ -291,17 +285,7 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
           ]}
         />
 
-        {/* CHART 2: Attendance */}
-        <DistributionCard
-          title="Attendance Distribution"
-          data={[
-            { label: 'Present', count: stats.attendance.PRESENT || 0, color: '#22a57d' },
-            { label: 'Late', count: stats.attendance.LATE || 0, color: '#d79c41' },
-            { label: 'Absent', count: stats.attendance.ABSENT || 0, color: '#c67a53' },
-          ]}
-        />
-
-        {/* CHART 3: Participation */}
+        {/* CHART 2: Participation */}
         <DistributionCard
           title="Classroom Participation"
           data={[
@@ -311,7 +295,7 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
           ]}
         />
 
-        {/* CHART 4: Homework Completion */}
+        {/* CHART 3: Homework Completion */}
         <DistributionCard
           title="Homework & Assignment Completion"
           data={[
@@ -321,7 +305,7 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
           ]}
         />
 
-        {/* CHART 5: Discipline & Conduct */}
+        {/* CHART 4: Discipline & Conduct */}
         <DistributionCard
           title="Discipline & School Conduct"
           data={[
@@ -331,13 +315,17 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
           ]}
         />
 
-        {/* CHART 6: Punctuality */}
+        {/* CHART 5: Punctuality */}
         <DistributionCard
           title="Punctuality"
           data={[
             { label: 'Always On Time', count: stats.punctuality.ALWAYS_ON_TIME || 0, color: '#22a57d' },
+            { label: 'Usually On Time', count: stats.punctuality.USUALLY_ON_TIME || 0, color: '#3b82f6' },
             { label: 'Occasionally Late', count: stats.punctuality.OCCASIONALLY_LATE || 0, color: '#d79c41' },
             { label: 'Frequently Late', count: stats.punctuality.FREQUENTLY_LATE || 0, color: '#c67a53' },
+            { label: 'Occasionally Absent', count: stats.punctuality.OCCASIONALLY_ABSENT || 0, color: '#b06a4e' },
+            { label: 'Frequently Absent', count: stats.punctuality.FREQUENTLY_ABSENT || 0, color: '#8a4a32' },
+            { label: 'Always Absent', count: stats.punctuality.ALWAYS_ABSENT || 0, color: '#5f3220' },
           ]}
         />
 

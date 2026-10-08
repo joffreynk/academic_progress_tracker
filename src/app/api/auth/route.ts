@@ -4,6 +4,7 @@ import { and, eq, like, or } from 'drizzle-orm';
 import { compare, hash } from 'bcryptjs';
 import { z } from 'zod';
 import { audit, checkOrigin, createSession, currentUser, destroySession, hashToken, AppError } from '@/lib/security';
+import { passwordSchema } from '@/lib/passwordSchema';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,7 +37,7 @@ export async function GET(req: Request) {
   const identity = new URL(req.url).searchParams.get('identity');
   if (identity !== null) return Response.json({ logoUrl: await logoFor(identity) }, { headers: { 'Cache-Control': 'public, max-age=60' } });
   const user = await currentUser();
-  return Response.json({user:user ? {id:user.id,name:user.name,role:user.role,organizationId:user.organizationId} : null});
+  return Response.json({user:user ? {id:user.id,name:user.name,username:user.username,role:user.role,organizationId:user.organizationId} : null});
 }
 export async function POST(req: Request) {
  try {
@@ -48,13 +49,13 @@ export async function POST(req: Request) {
    if(!process.env.SETUP_TOKEN || raw.setupToken!==process.env.SETUP_TOKEN) throw new AppError('Setup is unavailable.',403);
    const existing=await db.select({id:users.id}).from(users).limit(1);
    if(existing.length) throw new AppError('Setup has already been completed.',403);
-   const data=z.object({name:z.string().min(2),username:z.string().min(3),email:z.email(),password:z.string().min(12)}).parse(raw);
+   const data=z.object({name:z.string().min(2),username:z.string().min(3),email:z.email(),password:passwordSchema}).parse(raw);
    const [user]=await db.insert(users).values({name:data.name,username:data.username.toLowerCase(),email:data.email.toLowerCase(),passwordHash:await hash(data.password,8),role:'SUPER_ADMIN'}).returning();
    await audit(null,user.id,'INITIAL_SETUP','user',user.id); await createSession(user.id); return Response.json({ok:true});
   }
   if(action==='password') {
    const user=await currentUser(); if(!user) throw new AppError('Sign in required.',401);
-   const data=z.object({current:z.string(),password:z.string().min(12)}).parse(raw);
+   const data=z.object({current:z.string(),password:passwordSchema}).parse(raw);
    if(!await compare(data.current,user.passwordHash)) throw new AppError('Current password is incorrect.',400);
    await db.update(users).set({passwordHash:await hash(data.password,8),updatedAt:new Date()}).where(eq(users.id,user.id));
    await audit(user.organizationId,user.id,'PASSWORD_CHANGE','user',user.id); await destroySession(); return Response.json({ok:true});
@@ -76,5 +77,5 @@ export async function POST(req: Request) {
   await db.update(users).set({lastLoginAt:new Date()}).where(eq(users.id,user.id));
   await createSession(user.id); await audit(user.organizationId,user.id,'LOGIN','auth',user.id);
   return Response.json({ok:true,role:user.role});
- } catch(e) { if(e instanceof AppError) return Response.json({error:e.message},{status:e.status}); if(e instanceof z.ZodError) return Response.json({error:'Please check the information entered.'},{status:400}); console.error('Auth request failed',e); return Response.json({error:'An unexpected error occurred.'},{status:500}); }
+ } catch(e) { if(e instanceof AppError) return Response.json({error:e.message},{status:e.status}); if(e instanceof z.ZodError){ const passwordIssue=e.issues.find(i=>i.path.includes('password')); return Response.json({error:passwordIssue?.message||'Please check the information entered.'},{status:400}); } console.error('Auth request failed',e); return Response.json({error:'An unexpected error occurred.'},{status:500}); }
 }

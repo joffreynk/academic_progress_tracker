@@ -1,20 +1,9 @@
 'use client';
 import { useState } from 'react';
-import { X, AlertCircle, CheckCircle2, ChevronRight, LockKeyhole } from 'lucide-react';
+import { X, AlertCircle, CheckCircle2, LockKeyhole } from 'lucide-react';
+import { PASSWORD_RULE_TEXT, isStrongPassword, passwordProblem } from '@/lib/password';
 
 export type ModalConfig =
-  | {
-      type: 'submit';
-      title: string;
-      className: string;
-      subjectName: string;
-      date: string;
-      total: number;
-      present: number;
-      late: number;
-      absent: number;
-      onConfirm: () => void;
-    }
   | {
       type: 'reason';
       title: string;
@@ -50,6 +39,10 @@ export type ModalConfig =
       onConfirm: (password: string) => void;
     }
   | {
+      type: 'change_password';
+      onConfirm: (current: string, next: string) => Promise<void>;
+    }
+  | {
       type: 'confirm';
       title: string;
       message: string;
@@ -76,9 +69,6 @@ export default function Modal({
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" onClick={onClose}>
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-        {config.type === 'submit' && (
-          <SubmitModal config={config} onClose={onClose} />
-        )}
         {config.type === 'reason' && (
           <ReasonModal config={config} onClose={onClose} />
         )}
@@ -91,6 +81,9 @@ export default function Modal({
         {config.type === 'reset_password' && (
           <ResetPasswordModal config={config} onClose={onClose} />
         )}
+        {config.type === 'change_password' && (
+          <ChangePasswordModal config={config} onClose={onClose} />
+        )}
         {config.type === 'confirm' && (
           <ConfirmModal config={config} onClose={onClose} />
         )}
@@ -99,38 +92,6 @@ export default function Modal({
         )}
       </div>
     </div>
-  );
-}
-
-function SubmitModal({ config, onClose }: { config: Extract<ModalConfig, { type: 'submit' }>; onClose: () => void }) {
-  return (
-    <>
-      <div className="modal-header">
-        <h3>{config.title}</h3>
-        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
-      </div>
-      <div className="modal-body">
-        <div className="modal-summary-box">
-          <strong>{config.className} · {config.subjectName}</strong>
-          <span>Lesson Date: {config.date}</span>
-          <div className="modal-summary-stats">
-            <div><small>Enrolled</small><strong>{config.total}</strong></div>
-            <div><small>Present</small><strong style={{ color: '#22a57d' }}>{config.present}</strong></div>
-            <div><small>Late</small><strong style={{ color: '#d79c41' }}>{config.late}</strong></div>
-            <div><small>Absent</small><strong style={{ color: '#c67a53' }}>{config.absent}</strong></div>
-          </div>
-        </div>
-        <p style={{ fontSize: 13, color: '#748792', margin: 0 }}>
-          Once submitted, this daily report enters the administrative review queue and cannot be altered unless returned.
-        </p>
-      </div>
-      <div className="modal-footer">
-        <button className="btn outline" onClick={onClose}>Cancel</button>
-        <button className="btn primary" onClick={() => { config.onConfirm(); onClose(); }}>
-          Confirm & Submit <ChevronRight size={16} />
-        </button>
-      </div>
-    </>
   );
 }
 
@@ -315,7 +276,7 @@ function ResetPasswordModal({ config, onClose }: { config: Extract<ModalConfig, 
       </div>
       <div className="modal-body">
         <p style={{ fontSize: 13, color: '#748792', margin: '0 0 12px 0' }}>
-          Resetting password for <strong>{config.targetName}</strong>. New password must be at least 12 characters.
+          Resetting password for <strong>{config.targetName}</strong>. {PASSWORD_RULE_TEXT}
         </p>
         <label>
           New Password
@@ -324,18 +285,94 @@ function ResetPasswordModal({ config, onClose }: { config: Extract<ModalConfig, 
             autoFocus
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="Minimum 12 characters"
+            placeholder="At least 6 characters"
           />
         </label>
+        {password && passwordProblem(password) && (
+          <p style={{ fontSize: 12, color: '#c0392b', margin: '4px 0 0 0' }}>{passwordProblem(password)}</p>
+        )}
       </div>
       <div className="modal-footer">
         <button className="btn outline" onClick={onClose}>Cancel</button>
         <button
           className="btn primary"
-          disabled={password.length < 12}
+          disabled={!isStrongPassword(password)}
           onClick={() => { config.onConfirm(password); onClose(); }}
         >
           <LockKeyhole size={15} /> Update Password
+        </button>
+      </div>
+    </>
+  );
+}
+
+function ChangePasswordModal({ config, onClose }: { config: Extract<ModalConfig, { type: 'change_password' }>; onClose: () => void }) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const problem = next ? passwordProblem(next) : null;
+  const mismatch = confirm.length > 0 && confirm !== next;
+  const canSubmit = !!current && !!next && !problem && next === confirm && !busy;
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await config.onConfirm(current, next);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Password change failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <div className="modal-header">
+        <h3>Change Password</h3>
+        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+      </div>
+      <div className="modal-body">
+        <p style={{ fontSize: 13, color: '#748792', margin: '0 0 12px 0' }}>
+          Sign in again after changing your password. {PASSWORD_RULE_TEXT}
+        </p>
+        <label>
+          Current Password
+          <input
+            type="password"
+            autoFocus
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            placeholder="Your current password"
+          />
+        </label>
+        <label>
+          New Password
+          <input
+            type="password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            placeholder="At least 6 characters"
+          />
+        </label>
+        {problem && <p style={{ fontSize: 12, color: '#c0392b', margin: '4px 0 0 0' }}>{problem}</p>}
+        <label>
+          Confirm New Password
+          <input
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder="Repeat the new password"
+          />
+        </label>
+        {mismatch && <p style={{ fontSize: 12, color: '#c0392b', margin: '4px 0 0 0' }}>The passwords do not match.</p>}
+        {error && <p style={{ fontSize: 12, color: '#c0392b', margin: '8px 0 0 0' }}>{error}</p>}
+      </div>
+      <div className="modal-footer">
+        <button className="btn outline" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={!canSubmit} onClick={submit}>
+          <LockKeyhole size={15} /> {busy ? 'Updating...' : 'Change Password'}
         </button>
       </div>
     </>

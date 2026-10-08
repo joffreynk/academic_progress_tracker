@@ -398,6 +398,7 @@ Support:
 * Admin password reset
 * account activation/deactivation
 * session expiration
+* one shared password rule everywhere: **at least 6 characters with an uppercase letter, a lowercase letter, a number and a symbol**. The rule is enforced on the server for setup, password change, admin create/reset and teacher create/reset, and in the browser for the reset dialog. Generated passwords must satisfy it.
 
 Never store plaintext passwords.
 
@@ -608,7 +609,6 @@ Fields:
 * teacherId
 * name
 * email
-* department optional
 * active
 * createdAt
 * updatedAt
@@ -616,6 +616,8 @@ Fields:
 Unique:
 
 `organizationId + teacherId`
+
+**Change 2026-10:** the optional `department` field was removed (UI, API and a drop-column migration). Teachers are identified by `teacherId`, name and email. See §192.
 
 ---
 
@@ -1668,6 +1670,8 @@ The monthly output should use the school's existing wording:
 * Occasionally Late
 * Frequently Late
 
+*2026-10 update (§193 v3): monthly records no longer derive punctuality from late rates — the report shows the exact category the teacher selected from the seven-value punctuality select, absence categories included. The late-rate derivation above still applies to daily (legacy) records.
+
 ---
 
 # 49. ATTENDANCE MONTHLY RESULT
@@ -1794,6 +1798,8 @@ Present
 Late
 Absent
 Attendance %
+
+*(2026-10 update — §193 v3: this section is removed; the report shows a **Punctuality** section instead — the monthly result plus counts for all seven selected categories.)*
 
 ## Important Observations
 
@@ -1967,7 +1973,8 @@ Teacher import fields:
 * Teacher ID
 * Teacher Name
 * Email
-* Department
+
+**Change 2026-10:** `Department` is no longer a teacher import field — a `Department` column in a source file is ignored (`teachers.department` was removed). See §192.
 
 ---
 
@@ -2092,6 +2099,7 @@ Actions:
 * Activate
 * Deactivate
 * Manage Admin
+* Edit admin name, username and email
 * Open Organization
 
 Super Admin can manage organizations.
@@ -2981,7 +2989,9 @@ for daily attendance and monthly totals.
 
 # 100. FINAL MONTHLY REPORT DESIGN
 
-## MONTHLY STUDENT ACADEMIC AND BEHAVIOURAL FOLLOW-UP
+## MONTHLY STUDENT ACADEMIC PROGRESS REPORT
+
+*(2026-10 title update — the previous title was "MONTHLY STUDENT ACADEMIC AND BEHAVIOURAL FOLLOW-UP". The class counterpart is "MONTHLY CLASS ACADEMIC PROGRESS REPORT". Both are used in the PDF banner, the on-screen report eyebrow and the Excel export titles. See §192.)*
 
 Month:
 September 2026
@@ -3043,6 +3053,10 @@ Late:
 
 Absent:
 1
+
+---
+
+*(2026-10 update — §193 v3: this section is removed from the report. Attendance is no longer displayed in any report, export or statistic; the punctuality section in §2 carries the whole attendance story through the seven selected categories. §49 remains an internal calculation only.)*
 
 ---
 
@@ -3911,6 +3925,8 @@ Charts:
 * participation distribution
 * conduct distribution
 * report activity
+
+*(2026-10 update — §193 v3: the attendance card and attendance chart are replaced by a punctuality card (on-time share) and a seven-category punctuality distribution; attendance is no longer shown in the statistics screen or its exports.)*
 
 ---
 
@@ -4996,3 +5012,134 @@ The system must not ask teachers to reconstruct an entire month from memory.
 The system must preserve the school's reporting terminology and structure while modernizing the data collection process.
 
 Build this as a serious school information system with security, performance, auditability, and maintainability as first-class requirements.
+
+---
+
+# 192. ADDENDUM — 2026-10 DECISIONS, CLUBS & ACTIVITIES
+
+Everything below was agreed in review on top of the original specification and is part of the requirements.
+
+## A. Report titles
+
+* Student reports (PDF banner, on-screen report eyebrow, student Excel titles): `MONTHLY STUDENT ACADEMIC PROGRESS REPORT`.
+* Class reports (class summary PDF banner, class Excel title): `MONTHLY CLASS ACADEMIC PROGRESS REPORT`.
+* The subject/class export keeps `CLASS SUBJECT MONTHLY REPORT`.
+* The previous title `MONTHLY STUDENT ACADEMIC AND BEHAVIOURAL FOLLOW-UP` (and `CLASS ACADEMIC AND BEHAVIOURAL FOLLOW-UP SUMMARY`) is retired everywhere; `scripts/pdf.test.ts` asserts both new titles and that the old string is gone.
+
+## B. Password rule
+
+* Rule: **at least 6 characters with an uppercase letter, a lowercase letter, a number and a symbol.**
+* One shared implementation: `src/lib/password.ts` (client-safe `passwordProblem`, `isStrongPassword`, `PASSWORD_RULE_TEXT`) and `src/lib/passwordSchema.ts` (server zod schema + `generateStrongPassword`).
+* Enforced at first-run setup, password change, admin create, admin password reset, teacher create, teacher password reset, in the reset dialog (button disabled + inline failing message) and by every generated password. `DEMO_PASSWORD` for the seed must satisfy the same rule.
+* bcrypt stays the hash, cost 8 in the application.
+
+## C. teachers.department removed
+
+* The optional `department` field is gone from the schema, the teacher UI, the teacher API paths, the teacher import, the seed and the local account reset; dropped by `d1/migrations/0003_short_mister_sinister.sql`.
+* A `Department` column in a source workbook is ignored on import.
+* §15 and §60 above are updated accordingly.
+
+## D. Super admin edits the primary administrator
+
+* New SUPER_ADMIN action `updateAdmin`: edits the primary admin's name, username and email for an organization, rejects a non-primary user and duplicate username/email, writes `ADMIN_UPDATED` to the audit log.
+* `view=organizations` now returns the `admin` profile so the Schools table shows an **Edit Admin** button beside **Reset Admin**.
+* Together with the existing `admin` (create/replace) and `resetAdmin` actions this satisfies §65 "Manage Admin".
+
+## E. Clubs & activities (new feature)
+
+Tables (migration `0003`): `clubs`, `club_teachers` (role `MEMBER` | `LEAD`; the first assigned teacher is the teacher-in-charge), `club_members`, `club_activities`.
+
+Roles:
+
+* **Admin** creates and edits clubs, assigns teachers and student members, archives clubs (soft delete, restorable from the edit form), records activities and reviews them. Archived clubs stay visible to admins.
+* **Teacher** only sees clubs they are assigned to (archived clubs are hidden), can record, edit and submit activities for those clubs, and cannot review activities, create or archive clubs, or edit rosters — roster editing is admin-only.
+* **Super admin** has no clubs screen or API access.
+
+Workflow (same state machine as §41, through `reviewTransition`):
+
+`DRAFT → SUBMITTED → UNDER_REVIEW → APPROVED | RETURNED`
+
+* Returning or reopening requires a reason; approval only comes from `UNDER_REVIEW`.
+* Editing a `RETURNED` activity moves it back to `DRAFT` and clears the review fields; only `DRAFT` and `RETURNED` activities are editable, only `DRAFT` and `RETURNED` are submittable.
+
+API: `GET view=clubs` (organization-scoped, teacher-scoped for teachers) plus actions `createClub`, `updateClub`, `saveClubActivity`, `submitClubActivity`, `reviewClubActivity`, and `deleteEntity` with `type: 'club'` (soft archive). Teacher membership is checked on every activity action, all ids are validated against the tenant, duplicate club names are rejected, and every change is audited (`CLUB_CREATED`, `CLUB_UPDATED`, `CLUB_DEACTIVATED`, `CLUB_ACTIVITY_CREATED`, `CLUB_ACTIVITY_UPDATED`, `CLUB_ACTIVITY_RESUBMITTED_DRAFT`, `CLUB_ACTIVITY_SUBMITTED`, `REPORT_UNDER_REVIEW`, `REPORT_APPROVED`, `REPORT_RETURNED`, `REPORT_REOPENED`).
+
+UI: `src/components/ClubsView.tsx`, nav entry **Clubs** for admin and teacher.
+
+Tests: `scripts/local-clubs-test.ts` (33 checks, needs `npm run dev`).
+
+## F. Verification and migration status
+
+* `npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` (business rules + password + pdf + monthly) and `npm run build` all pass.
+* Migration `0003` (club tables + `teachers.department` drop) is applied to the local SQLite database only, as is migration `0004` (monthly record tables and `settings.reportingCadence`, §193). The remote D1 database still runs the old schema until `npx wrangler d1 migrations apply student-academic-reporting-db --remote` is run before the next deploy — deploy code and migration together so production never sees a schema mismatch.
+* `.open-next/`, `.wrangler/`, logs and credential CSVs are ignored by Git; build with `npm run build` immediately before `wrangler deploy`.
+
+# 193. MONTHLY RECORD ENTRY — MANAGEMENT'S MODEL (2026-10)
+
+Management replaced the daily per-lesson observation form with one **monthly record** per class + subject + academic month. Revised 2026-10 (monthly merge): the dated capture form is gone from the UI — the monthly record is the only recording path, `settings.reportingCadence` was dropped, the dated tables were renamed `daily_lessons` → `monthly_lessons` and `daily_student_records` → `monthly_student_records` (migration `0006`), the save action became `saveMonthlyRecord` and the legacy detail view became `view=monthlyLesson` — while all historical dated data remains readable and reviewable (legacy months keep reporting). Also revised 2026-10: attendance percentages were removed from the form — attendance/punctuality is now **one select per student** with seven categories, and (v3) attendance itself is no longer displayed anywhere in reports, exports or statistics — it remains an internal calculation only (§49); every report answers with the selected punctuality category instead.
+
+## A. Data model
+
+* `monthlyEntries` — one row per organization + class + subject + `month` (`YYYY-MM`): teacher, academic year, `sessionsHeld`, `topics` (shown as **Content Covered**), class/subject/teacher name snapshots, status (`DRAFT | SUBMITTED | UNDER_REVIEW | APPROVED | RETURNED`), review fields, timestamps. Unique per (organization, class, subject, month).
+* `monthlyStudentEntries` — one row per monthly entry + student: the `punctuality` category, four level fields and an optional comment. No percentage columns exist.
+* `settings.reportingCadence` was removed by migration `d1/migrations/0006_merge_daily_to_monthly.sql` (2026-10 merge) — there is no cadence switch anymore; `0004_dark_silver_fox.sql` added `monthly_entries`, `monthly_student_entries` and (since dropped) the cadence column.
+
+The per-student attendance/punctuality select has exactly seven options: `ALWAYS_ON_TIME | USUALLY_ON_TIME | OCCASIONALLY_LATE | FREQUENTLY_LATE | OCCASIONALLY_ABSENT | FREQUENTLY_ABSENT | ALWAYS_ABSENT` (displayed as **Always On Time / Usually On Time / Occasionally Late / Frequently Late / Occasionally Absent / Frequently Absent / Always Absent**). The category is what gets stored, and `punctualityCounts()` expands it into session counts for the reporting pipeline so the reports agree with the selection:
+
+* **Always On Time** — every session present.
+* **Usually On Time** — about 5% of the sessions late (below §48's occasional band), i.e. on time most of the time.
+* **Occasionally Late** — at least one late session, late rate inside §48's `settings.punctualityOccasionallyMax` band.
+* **Frequently Late** — at least 30% of the sessions late and above the occasional band.
+* **Occasionally Absent** — about 15% of the sessions absent.
+* **Frequently Absent** — at least half of the sessions absent.
+* **Always Absent** — every session absent.
+
+The raw category is carried on every expanded session (`Observation.punctuality` + `source: 'monthly'`), and `summarize()` reports the label of the dominant raw category as `punctualityResult` for monthly rows (`monthlyPunctualityResult()`), falling back to §48's late-rate derivation for legacy dated rows.
+
+Each student carries one level per field — performance, participation, homework (`ALWAYS_COMPLETED | USUALLY_COMPLETED | RARELY_COMPLETED`), conduct (`EXCELLENT | GOOD | NEEDS_IMPROVEMENT`) — plus an optional comment.
+
+The content-covered text is stored once on the record; the per-student homework level maps back onto the historical homework rate labels (`ALWAYS → Always Completed` etc.) through `HOMEWORK_RATE`.
+
+## B. Entry rules (server)
+
+* Month must be a valid `YYYY-MM`, must not be in the future (organization timezone) and must not be a closed month (409).
+* The academic year covering the month must exist; teachers may only file their own assigned class+subject. Admins may file for any active assignment in their organization; a save with no active assignment is rejected (409) unless the record already exists, and re-saving keeps the original teacher attribution.
+* Submit requires the full current roster (every active student in the class by default, or every student of the saved subject group once one exists, up to 200 rows), non-empty **Content Covered** text, a punctuality category for every student, and all four levels for every student. Unknown category values are rejected by zod (400); draft rows may still be unchosen (null).
+* **Subject groups** (`subject_students`, migration `0007`): teachers manage which students of their class take a subject with `POST saveSubjectRoster {classId, subjectId, studentIds}` — same pattern as club member management (search + checkboxes). An empty selection deletes the rows and restores the whole-class default; only active students of the class may be selected (400 otherwise); teachers need an active assignment for the pair (403), admins may manage any class. The resolved roster (group ∩ active class students; whole class when no group matches) drives `view=monthlyEntry` rows, both submit rules and every `rosterCount` completion percentage. Classes are year-scoped, so each academic year starts fresh on the default. Audited as `SUBJECT_ROSTER_SAVED` / `subject_roster`.
+* If any student's performance or conduct is `NEEDS_IMPROVEMENT`, a comment is required for that student on submit.
+* Only `DRAFT` and `RETURNED` records are editable (409 once submitted); a returned record keeps `RETURNED` status and its review comment on further draft saves and is only cleared on resubmit.
+* Teachers may delete only their own `DRAFT`/`RETURNED` monthly records; administrators may delete any draft or returned record in their organization (`deleteDraft` handles both entity kinds).
+* Every save snapshots the student name and code onto each record row (`studentNameSnapshot`/`studentCodeSnapshot`); report and trend reads prefer the snapshot over the live student name.
+* Every save writes `MONTHLY_ENTRY_SAVED` / `MONTHLY_ENTRY_SUBMITTED` to the audit log with `entityType: monthly_entry`.
+
+## C. API
+
+* `GET view=monthlyEntries&month=YYYY-MM` (optional `classId`/`subjectId`) — filed entries plus `planned` assignments with no entry yet (client renders them as **Missing** rows in the filing checklist).
+* `GET view=monthlyEntry&month=…&classId=…&subjectId=…` (or `&entryId=…`) — `{ entry, roster, rosterDefault, records, monthClosed, editable }`; blank form when nothing is filed; each record carries its `punctuality` category; `roster` is the subject group when one exists, otherwise the whole class.
+* `GET view=subjectRoster&classId=…&subjectId=…` — `{ students, enrolled, isDefault }` for the roster editor: all active class students, the saved group's ids and whether the whole-class default applies.
+* `POST saveSubjectRoster` — replaces the group for the pair (`studentIds: []` restores the default); `{ ok, count, isDefault }`.
+* `POST saveMonthlyEntry` — upsert for the month with `submit: true|false` (submit performs validation and moves `DRAFT/RETURNED → SUBMITTED`).
+* `POST review` — the shared review transition, with a monthly-entry fallback (`entity: 'monthly_entry'` when the id is a monthly entry); audit actions are the shared `REPORT_*` set.
+* `GET view=monthly` — excludes any month that has a monthly entry for the same class + subject (a monthly record **replaces** that month's legacy dated rows; there is never a mix), then expands the entry with `entryObservations()` into one synthetic observation per held session (the selected category expanded to counts) so grouping, thresholds, source counts, CSV/XLSX and PDF exports work unchanged (the review comment appears once, on the first session).
+* `GET view=reports` — merges legacy and monthly report-history rows; monthly rows carry `kind: 'monthly'` and `month: 'YYYY-MM'` (`lessonDate = <month>-01`), legacy rows carry `kind: 'lesson'`, sorted and sliced alike.
+* `GET view=studentProfile` — the timeline passes the selected punctuality category through unchanged and derives the attendance badge from it (`includes('ABSENT')` → ABSENT, `includes('LATE')` → LATE, otherwise PRESENT), `lessonDate` = month end.
+* `GET view=reference` / `view=settings` and `POST settings` — no longer carry any cadence flag.
+
+## D. UI
+
+* `src/components/MonthlyEntryView.tsx` — the **Monthly Record** page: month/class/subject selector, filing checklist (filed rows open the form; missing rows open a blank form), form with sessions and **Content Covered** header, roster table with one **Punctuality** select per student (seven categories, placeholder “— Choose —”, amber highlight while unchosen), **Manage students** (the club-style subject-group panel: search, checkboxes, **Use whole class**, **Save Group**; shown while the record is editable, next to the roster count that reads “N students” on the default and “N students · subject group” once a group is saved), **Fill all on time**, Save Draft / Submit / Delete (drafts and returned), returned banner with the review comment, closed-month banner.
+* `page.tsx` — after the 2026-10 merge the teacher nav always offers **Monthly Record** (the old **New Report** dated form and its `page === 'new'` view were removed), admins get a **Monthly Record** entry as well, reports history shows the month tag; the admin review drawer shows the selected punctuality category per student with the transition buttons and **Settings** has no cadence selector anymore. Legacy dated rows open read-only from the reports history (same drawer for admins with **Correct Date** and the transition buttons; teachers see the record plus **Delete Draft** while it is draft/returned) — the capture page, its confirm dialog and the `submit` modal type were deleted.
+
+## E. Reports and exports
+
+* The class summary's **Report perspectives** toolbar gains **Class Reports ZIP** (`MonthlyOverview.tsx`): `buildClassReportsZip()` / `downloadClassReportsZip()` in `src/lib/reportPdf.ts` build one PDF per student of the class (grouped in a per-class folder, `jszip` DEFLATE, progress callback) — the ZIP is fully client-side.
+* Every student PDF is a **single A4 page** with small fonts (6.5–7 pt tables): organization name and logo in the header (plus right-aligned period and generated date), a one-line identity strip, a KPI strip (performance / punctuality / homework / conduct), the subject table, punctuality & discipline facts, the month-over-month comparison, teacher comments, the latest lesson activity and signature lines, with the organization name and `Page n of m` in the footer. Optional sections (combined and per-subject month-over-month tables, comments, recent activity, signatures) are space-guarded with a height estimate — the signature block's space is always reserved — so the report never spills onto a second page; the class summary stays a landscape multi-page document with the same header, footer and small-font tables.
+* Report titles, thresholds, calculation version and month-closure semantics are unchanged and shared with legacy dated data; punctuality in every report answers with the selected category for monthly records (§48's late-rate derivation for legacy dated records).
+* Attendance is removed from every report and statistic (2026-10 v3): student PDF (attendance KPI, METRICS rows, subject-table `ATT. %`, `Attendance` facts, `ATT.` column), class summary PDF (`P / L / A`, `ATT. %`, attendance mix), `MonthlyOverview.tsx` (attendance tiles/sections/narrative), `StatisticsView.tsx` (attendance tally/card/chart/export, replaced by a punctuality card and a seven-category punctuality distribution), `StudentProfileModal.tsx` (attendance summary/tab/table, replaced by the punctuality tally) and the monthly table/CSV/XLSX in `page.tsx` (single **Punctuality** column). The legacy dated review drawer keeps its attendance fields, and `attendance`/`attendanceRate` are still computed internally for the engine and tests.
+
+## F. Scripts, tests and migration status
+
+* `scripts/monthly.test.ts` — 11 unit tests (category → session counts total and §48 band agreement for all seven values, zod enum acceptance/rejection, weekday session dates, entry → observation round trip through `summarize()`, every category round-tripping into `punctualityResult`, frequently-absent handling, `groupReports`, `combineAttendanceCounts`, month/year validation). `npm test` runs rules + password + pdf + monthly; `scripts/pdf.test.ts` additionally asserts that each student report fits on exactly one page (organization name in header and footer, KPI strip, comparison, comments, signatures), that punctuality is present and attendance is gone, and that the ZIP contains one such PDF per student.
+* `scripts/local-monthly-test.ts` — 36 end-to-end checks against `npm run dev` (no cadence flag after the merge, checklist, read-only approved record, punctuality validation, report merging, student timeline, draft/submit/409s, review round trip with note persistence, audit, delete).
+* `scripts/seed-monthly-demo.ts` — seeds a demo month (e.g. `2026-09`, deterministic punctuality categories) into the local database; `scripts/convert-legacy-lessons-to-monthly.ts` collapses historical legacy attendance into punctuality categories (≥50% absent → Frequently Absent, ≥12% absent → Occasionally Absent, ≥30% late → Frequently Late, any late → Occasionally Late, otherwise Always On Time; idempotent, skips months that already have an entry).
+* Migration `0004` plus `0005` (`club_activity_records`) and `0006` (the daily→monthly table rename, `saveMonthlyRecord` / `view=monthlyLesson` and the cadence drop) are applied to the local SQLite database only so far; apply them to the remote D1 database with `npx wrangler d1 migrations apply student-academic-reporting-db --remote` **before** deploying the build that expects them.

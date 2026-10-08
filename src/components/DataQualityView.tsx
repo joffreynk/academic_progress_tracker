@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, FileText, UserX, BookOpen, RefreshCw } from 'lucide-react';
 import PeriodPicker from './PeriodPicker';
-import { periodLabel, type Period } from '@/lib/period';
+import { periodLabel, monthLabelShort, type Period } from '@/lib/period';
 
 interface DataQualityData {
   period: Period;
@@ -17,6 +17,7 @@ interface DataQualityData {
     recordsCount: number;
     rosterCount: number;
     completionRate: number;
+    kind: 'lesson' | 'monthly';
   }[];
   returned: {
     id: string;
@@ -27,6 +28,7 @@ interface DataQualityData {
     teacherName: string;
     reviewComment: string | null;
     updatedAt: string;
+    kind: 'lesson' | 'monthly';
   }[];
   studentsWithNoRecords: {
     id: string;
@@ -51,7 +53,7 @@ export default function DataQualityView({
 }: {
   api: (view: string, params?: Record<string, string>) => Promise<any>;
   today: string;
-  onOpenReport?: (id: string) => void;
+  onOpenReport?: (id: string, kind: 'lesson' | 'monthly') => void;
 }) {
   const [range, setRange] = useState({ from: '', to: '' });
   const [data, setData] = useState<DataQualityData | null>(null);
@@ -79,7 +81,7 @@ export default function DataQualityView({
           <div className="eyebrow">ADMINISTRATIVE AUDIT & INTEGRITY</div>
           <h2>Data Quality & Completeness Dashboard</h2>
           <p>
-            Track in-progress drafts, returned lessons requiring revision, unrecorded students, and inactive curriculum areas.
+            Track in-progress drafts, returned reports requiring revision, unrecorded students, and inactive curriculum areas — across legacy and monthly records.
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -167,7 +169,7 @@ export default function DataQualityView({
                     <tbody>
                       {data.drafts.map((d) => (
                         <tr key={d.id}>
-                          <td>{d.lessonDate}</td>
+                          <td>{d.kind === 'monthly' ? monthLabelShort(d.lessonDate) : d.lessonDate}</td>
                           <td><strong>{d.className}</strong> · {d.subjectName}</td>
                           <td>{d.teacherName}</td>
                           <td>
@@ -182,6 +184,13 @@ export default function DataQualityView({
                                 />
                               </div>
                               <span style={{ fontSize: 11, fontWeight: 600 }}>{d.completionRate}%</span>
+                              <button
+                                className="btn outline"
+                                style={{ padding: '2px 6px', fontSize: 11 }}
+                                onClick={() => onOpenReport?.(d.id, d.kind)}
+                              >
+                                Open
+                              </button>
                             </div>
                           </td>
                         </tr>
@@ -208,15 +217,25 @@ export default function DataQualityView({
                         <th>Class & Subject</th>
                         <th>Teacher</th>
                         <th>Admin Comment</th>
+                        <th></th>
                       </tr>
                     </thead>
                     <tbody>
                       {data.returned.map((r) => (
                         <tr key={r.id}>
-                          <td>{r.lessonDate}</td>
+                          <td>{r.kind === 'monthly' ? monthLabelShort(r.lessonDate) : r.lessonDate}</td>
                           <td><strong>{r.className}</strong> · {r.subjectName}</td>
                           <td>{r.teacherName}</td>
                           <td style={{ fontSize: 12, color: '#c67a53', maxWidth: 160 }}>{r.reviewComment || '—'}</td>
+                          <td>
+                            <button
+                              className="btn outline"
+                              style={{ padding: '2px 6px', fontSize: 11 }}
+                              onClick={() => onOpenReport?.(r.id, r.kind)}
+                            >
+                              Open
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -261,10 +280,10 @@ export default function DataQualityView({
             {/* SUBJECTS WITH NO RECORDS */}
             <div className="panel sub-panel" style={{ padding: 16 }}>
               <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 16, marginBottom: 12 }}>
-                <BookOpen size={16} color="#748792" /> Active Subjects with No Lessons ({data.subjectsWithNoRecords.length})
+                <BookOpen size={16} color="#748792" /> Active Subjects with No Records ({data.subjectsWithNoRecords.length})
               </h3>
               {data.subjectsWithNoRecords.length === 0 ? (
-                <p style={{ color: '#22a57d', fontSize: 13 }}>Every active curriculum subject has recorded lessons in this period.</p>
+                <p style={{ color: '#22a57d', fontSize: 13 }}>Every active curriculum subject has recorded reports in this period.</p>
               ) : (
                 <div className="table-scroll">
                   <table>

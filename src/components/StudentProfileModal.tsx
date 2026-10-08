@@ -48,7 +48,7 @@ export default function StudentProfileModal({
   onClose: () => void;
   api: (view: string, params?: Record<string, string>) => Promise<any>;
 }) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'daily' | 'trends' | 'attendance' | 'behaviour'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'records' | 'trends' | 'attendance' | 'behaviour'>('overview');
   const [trends, setTrends] = useState<MonthlyTrend[]>([]);
   const [loadingTrends, setLoadingTrends] = useState(false);
 
@@ -67,13 +67,17 @@ export default function StudentProfileModal({
 
   const { student, timeline, significant } = data;
 
-  // Compute attendance summary
-  const presentCount = timeline.filter((t) => t.attendance === 'PRESENT').length;
-  const lateCount = timeline.filter((t) => t.attendance === 'LATE').length;
-  const absentCount = timeline.filter((t) => t.attendance === 'ABSENT').length;
-  const totalLessons = timeline.length;
-  const attendedCount = presentCount + lateCount;
-  const attendanceRate = totalLessons > 0 ? Math.round((attendedCount / totalLessons) * 100) : 0;
+  // Punctuality tally across the merged report timeline (attendance is no longer reported).
+  const punct = { onTime: 0, late: 0, absent: 0 };
+  for (const t of timeline) {
+    const p = t.punctuality;
+    if (p === 'ALWAYS_ON_TIME' || p === 'USUALLY_ON_TIME') punct.onTime += 1;
+    else if (p === 'OCCASIONALLY_LATE' || p === 'FREQUENTLY_LATE') punct.late += 1;
+    else if (p && p.includes('ABSENT')) punct.absent += 1;
+    else if (!p && t.attendance === 'ABSENT') punct.absent += 1;
+  }
+  const punctTotal = punct.onTime + punct.late + punct.absent;
+  const punctRate = punctTotal > 0 ? Math.round((punct.onTime / punctTotal) * 100) : 0;
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" onClick={onClose}>
@@ -94,14 +98,14 @@ export default function StudentProfileModal({
           <button className={`profile-tab-btn ${activeTab === 'overview' ? 'active' : ''}`} onClick={() => setActiveTab('overview')}>
             <User size={15} /> Overview
           </button>
-          <button className={`profile-tab-btn ${activeTab === 'daily' ? 'active' : ''}`} onClick={() => setActiveTab('daily')}>
-            <Calendar size={15} /> Daily Records ({timeline.length})
+          <button className={`profile-tab-btn ${activeTab === 'records' ? 'active' : ''}`} onClick={() => setActiveTab('records')}>
+            <Calendar size={15} /> Records ({timeline.length})
           </button>
           <button className={`profile-tab-btn ${activeTab === 'trends' ? 'active' : ''}`} onClick={() => setActiveTab('trends')}>
             <TrendingUp size={15} /> Monthly Trends
           </button>
           <button className={`profile-tab-btn ${activeTab === 'attendance' ? 'active' : ''}`} onClick={() => setActiveTab('attendance')}>
-            <Clock size={15} /> Attendance
+            <Clock size={15} /> Punctuality
           </button>
           <button className={`profile-tab-btn ${activeTab === 'behaviour' ? 'active' : ''}`} onClick={() => setActiveTab('behaviour')}>
             <AlertTriangle size={15} /> Behaviour & Conduct ({significant.length})
@@ -114,13 +118,13 @@ export default function StudentProfileModal({
             <div>
               <div className="stat-grid" style={{ marginBottom: 16 }}>
                 <div className="stat-card">
-                  <div className="stat-label">Total Lessons Recorded</div>
-                  <div className="stat-value">{totalLessons}</div>
+                  <div className="stat-label">Total Records</div>
+                  <div className="stat-value">{timeline.length}</div>
                 </div>
                 <div className="stat-card">
-                  <div className="stat-label">Overall Attendance</div>
-                  <div className="stat-value" style={{ color: attendanceRate >= 85 ? '#22a57d' : '#c67a53' }}>
-                    {attendanceRate}%
+                  <div className="stat-label">Punctuality</div>
+                  <div className="stat-value" style={{ color: punctRate >= 85 ? '#22a57d' : '#c67a53' }}>
+                    {punctTotal ? `${punctRate}%` : '—'}
                   </div>
                 </div>
                 <div className="stat-card">
@@ -131,9 +135,9 @@ export default function StudentProfileModal({
                 </div>
               </div>
 
-              <h4>Recent Lesson Activity</h4>
+              <h4>Recent Report Activity</h4>
               {timeline.length === 0 ? (
-                <p style={{ color: '#748792' }}>No daily lesson records found for this student.</p>
+                <p style={{ color: '#748792' }}>No report records found for this student.</p>
               ) : (
                 <div className="table-scroll">
                   <table>
@@ -141,7 +145,7 @@ export default function StudentProfileModal({
                       <tr>
                         <th>Date</th>
                         <th>Subject</th>
-                        <th>Attendance</th>
+                        <th>Punctuality</th>
                         <th>Performance</th>
                         <th>Homework</th>
                       </tr>
@@ -151,11 +155,7 @@ export default function StudentProfileModal({
                         <tr key={i}>
                           <td>{t.lessonDate}</td>
                           <td><strong>{t.subject}</strong></td>
-                          <td>
-                            <span className={`badge badge-${t.attendance.toLowerCase()}`}>
-                              {t.attendance}
-                            </span>
-                          </td>
+                          <td>{t.punctuality ? t.punctuality.replaceAll('_', ' ') : '—'}</td>
                           <td>{t.performance ? t.performance.replace('_', ' ') : '—'}</td>
                           <td>{t.homework ? t.homework.replace('_', ' ') : '—'}</td>
                         </tr>
@@ -167,11 +167,11 @@ export default function StudentProfileModal({
             </div>
           )}
 
-          {/* TAB 2: DAILY RECORDS */}
-          {activeTab === 'daily' && (
+          {/* TAB 2: REPORT RECORDS */}
+          {activeTab === 'records' && (
             <div>
               {timeline.length === 0 ? (
-                <p style={{ color: '#748792' }}>No daily records recorded.</p>
+                <p style={{ color: '#748792' }}>No records for this student yet.</p>
               ) : (
                 <div className="table-scroll">
                   <table>
@@ -180,7 +180,6 @@ export default function StudentProfileModal({
                           <th>Date</th>
                           <th>Subject</th>
                           <th>Topic</th>
-                          <th>Attendance</th>
                           <th>Performance</th>
                           <th>Conduct</th>
                           <th>Punctuality</th>
@@ -195,14 +194,9 @@ export default function StudentProfileModal({
                           <td style={{ whiteSpace: 'nowrap' }}>{t.lessonDate}</td>
                           <td><strong>{t.subject}</strong></td>
                           <td style={{ maxWidth: 160 }}>{t.topic}</td>
-                          <td>
-                            <span className={`badge badge-${t.attendance.toLowerCase()}`}>
-                              {t.attendance}
-                            </span>
-                          </td>
                           <td>{t.performance ? t.performance.replace('_', ' ') : '—'}</td>
                           <td>{t.conduct ? t.conduct.replace('_', ' ') : '—'}</td>
-                          <td>{t.punctuality ? t.punctuality.replace('_', ' ') : '—'}</td>
+                          <td>{t.punctuality ? t.punctuality.replaceAll('_', ' ') : '—'}</td>
                           <td>{t.participation || '—'}</td>
                           <td>{t.homework ? t.homework.replace('_', ' ') : '—'}</td>
                           <td style={{ fontSize: 12, color: '#4b5563' }}>{t.comment || '—'}</td>
@@ -232,7 +226,7 @@ export default function StudentProfileModal({
                       <tr>
                         <th>Reporting Month</th>
                         <th>Lessons</th>
-                        <th>Attendance %</th>
+                        <th>Punctuality</th>
                         <th>Performance Result</th>
                         <th>Homework Result</th>
                         <th>Participation Result</th>
@@ -244,11 +238,7 @@ export default function StudentProfileModal({
                         <tr key={tr.month}>
                           <td><strong>{tr.month}</strong></td>
                           <td>{tr.lessons}</td>
-                          <td>
-                            <span style={{ fontWeight: 600, color: (tr.attendanceRate ?? 0) >= 80 ? '#22a57d' : '#c67a53' }}>
-                              {tr.attendanceRate !== null ? `${tr.attendanceRate}%` : '—'}
-                            </span>
-                          </td>
+                          <td>{tr.punctualityResult}</td>
                           <td>
                             <span className={`badge ${tr.performanceResult === 'EXCELLENT' ? 'badge-approved' : tr.performanceResult === 'GOOD' ? 'badge-submitted' : 'badge-returned'}`}>
                               {tr.performanceResult.replace('_', ' ')}
@@ -270,29 +260,29 @@ export default function StudentProfileModal({
             </div>
           )}
 
-          {/* TAB 4: ATTENDANCE */}
+          {/* TAB 4: PUNCTUALITY */}
           {activeTab === 'attendance' && (
             <div>
               <div className="monthly-overview-grid" style={{ marginBottom: 16 }}>
                 <div className="metric">
-                  <span>Attendance Rate</span>
-                  <strong style={{ color: attendanceRate >= 85 ? '#22a57d' : '#c67a53' }}>{attendanceRate}%</strong>
-                  <small>{attendedCount} attended of {totalLessons} lessons</small>
+                  <span>On-time share</span>
+                  <strong style={{ color: punctRate >= 85 ? '#22a57d' : '#c67a53' }}>{punctTotal ? `${punctRate}%` : '—'}</strong>
+                  <small>{punct.onTime} of {punctTotal} rated observations</small>
                 </div>
                 <div className="metric">
-                  <span>Present</span>
-                  <strong style={{ color: '#22a57d' }}>{presentCount}</strong>
-                  <small>On time and present</small>
+                  <span>On time</span>
+                  <strong style={{ color: '#22a57d' }}>{punct.onTime}</strong>
+                  <small>Always or usually on time</small>
                 </div>
                 <div className="metric">
-                  <span>Late Arrivals</span>
-                  <strong style={{ color: '#d79c41' }}>{lateCount}</strong>
-                  <small>Contributes to punctuality flags</small>
+                  <span>Late</span>
+                  <strong style={{ color: '#d79c41' }}>{punct.late}</strong>
+                  <small>Occasionally or frequently late</small>
                 </div>
                 <div className="metric">
-                  <span>Absences</span>
-                  <strong style={{ color: '#c67a53' }}>{absentCount}</strong>
-                  <small>Academic scores omitted</small>
+                  <span>Absent</span>
+                  <strong style={{ color: '#c67a53' }}>{punct.absent}</strong>
+                  <small>Occasionally, frequently or always absent</small>
                 </div>
               </div>
             </div>

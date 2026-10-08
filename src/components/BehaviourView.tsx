@@ -77,6 +77,9 @@ export default function BehaviourView({
             />
             <span style={{ fontSize: 13, fontWeight: 500 }}>Follow-up required only</span>
           </label>
+          <button className="btn primary" onClick={() => onOpenNewModal?.()}>
+            <Plus size={15} /> Log Observation
+          </button>
           <button className="btn outline" onClick={loadData} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'spinning' : ''} /> Refresh
           </button>

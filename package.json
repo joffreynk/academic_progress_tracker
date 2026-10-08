@@ -7,12 +7,13 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "tsx scripts/rules.test.ts && tsx scripts/pdf.test.ts",
+    "test": "tsx scripts/rules.test.ts && tsx scripts/password.test.ts && tsx scripts/pdf.test.ts && tsx scripts/monthly.test.ts",
     "db:seed": "tsx scripts/seed.ts",
+    "db:clear-records": "tsx scripts/clear-recorded-data.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "wrangler:dev": "wrangler dev",
-    "wrangler:deploy": "wrangler deploy"
+    "wrangler:deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
@@ -24,6 +25,7 @@
     "exceljs": "^4.4.0",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
+    "jszip": "^3.10.2",
     "lucide-react": "^1.48.0",
     "next": "16.3.7",
     "react": "19.2.6",

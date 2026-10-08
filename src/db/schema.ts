@@ -127,7 +127,6 @@ export const teachers = sqliteTable('teachers', {
   teacherId: text('teacher_id').notNull(),
   name: text('name').notNull(),
   email: text('email').notNull(),
-  department: text('department'),
   active: integer('active', { mode: 'boolean' }).notNull().default(true),
   createdAt: stamp(),
   updatedAt: updated(),
@@ -170,8 +169,100 @@ export const assignments = sqliteTable('teacher_assignments', {
   index('assignment_teacher_idx').on(t.organizationId, t.teacherId),
 ]);
 
-// §18 daily_lessons – one row per class/subject/date; §86 indexes; §63 name snapshots for historical accuracy
-export const lessons = sqliteTable('daily_lessons', {
+// Teacher-managed subject roster: which students of the class take this subject.
+// Classes are year-scoped, so class_id already isolates cohorts per academic year.
+// No rows for a (class, subject) means every active class student (the default).
+export const subjectStudents = sqliteTable('subject_students', {
+  id: id(),
+  organizationId: text('organization_id').notNull().references(() => organizations.id),
+  classId: text('class_id').notNull().references(() => classes.id),
+  subjectId: text('subject_id').notNull().references(() => subjects.id),
+  studentId: text('student_id').notNull().references(() => students.id),
+  createdAt: stamp(),
+}, t => [
+  uniqueIndex('subject_students_unique').on(t.classId, t.subjectId, t.studentId),
+  index('subject_students_lookup_idx').on(t.organizationId, t.classId, t.subjectId),
+]);
+
+// §16b clubs – co-curricular clubs; club activities follow the report review workflow
+export const clubs = sqliteTable('clubs', {
+  id: id(),
+  organizationId: text('organization_id').notNull().references(() => organizations.id),
+  name: text('name').notNull(),
+  description: text('description'),
+  academicYearId: text('academic_year_id').references(() => academicYears.id),
+  active: integer('active', { mode: 'boolean' }).notNull().default(true),
+  createdAt: stamp(),
+  updatedAt: updated(),
+}, t => [
+  uniqueIndex('clubs_org_name').on(t.organizationId, t.name),
+]);
+
+// Teachers attached to a club; role LEAD is the teacher-in-charge.
+export const clubTeachers = sqliteTable('club_teachers', {
+  id: id(),
+  organizationId: text('organization_id').notNull().references(() => organizations.id),
+  clubId: text('club_id').notNull().references(() => clubs.id),
+  teacherId: text('teacher_id').notNull().references(() => teachers.id),
+  role: text('role').notNull().default('MEMBER'),
+  createdAt: stamp(),
+}, t => [
+  uniqueIndex('club_teachers_unique').on(t.clubId, t.teacherId),
+]);
+
+export const clubMembers = sqliteTable('club_members', {
+  id: id(),
+  organizationId: text('organization_id').notNull().references(() => organizations.id),
+  clubId: text('club_id').notNull().references(() => clubs.id),
+  studentId: text('student_id').notNull().references(() => students.id),
+  createdAt: stamp(),
+}, t => [
+  uniqueIndex('club_members_unique').on(t.clubId, t.studentId),
+  index('club_members_student_idx').on(t.organizationId, t.studentId),
+]);
+
+// §18-style workflow: DRAFT → SUBMITTED → UNDER_REVIEW → APPROVED | RETURNED
+export const clubActivities = sqliteTable('club_activities', {
+  id: id(),
+  organizationId: text('organization_id').notNull().references(() => organizations.id),
+  clubId: text('club_id').notNull().references(() => clubs.id),
+  title: text('title').notNull(),
+  activityDate: text('activity_date').notNull(),
+  description: text('description').notNull().default(''),
+  status: text('status').notNull().default('DRAFT'),
+  createdBy: text('created_by').notNull().references(() => users.id),
+  createdAt: stamp(),
+  updatedAt: updated(),
+  submittedAt: integer('submitted_at', { mode: 'timestamp' }),
+  reviewedAt: integer('reviewed_at', { mode: 'timestamp' }),
+  reviewedBy: text('reviewed_by'),
+  reviewComment: text('review_comment'),
+}, t => [
+  index('club_activities_status_idx').on(t.organizationId, t.status),
+  index('club_activities_club_idx').on(t.clubId),
+]);
+
+export const clubActivityRecords = sqliteTable('club_activity_records', {
+  id: id(),
+  organizationId: text('organization_id').notNull().references(() => organizations.id),
+  clubActivityId: text('club_activity_id').notNull().references(() => clubActivities.id, { onDelete: 'cascade' }),
+  studentId: text('student_id').notNull().references(() => students.id),
+  studentNameSnapshot: text('student_name_snapshot'),
+  studentCodeSnapshot: text('student_code_snapshot'),
+  punctuality: text('punctuality'),
+  performance: text('performance'),
+  participation: text('participation'),
+  conduct: text('conduct'),
+  comment: text('comment'),
+  createdAt: stamp(),
+  updatedAt: updated(),
+}, t => [
+  uniqueIndex('club_activity_records_unique').on(t.clubActivityId, t.studentId),
+  index('club_activity_records_student_idx').on(t.organizationId, t.studentId),
+]);
+
+// §18 monthly_lessons – legacy dated observation rows (one per class/subject/date, read-only history); §86 indexes; §63 name snapshots
+export const lessons = sqliteTable('monthly_lessons', {
   id: id(),
   organizationId: text('organization_id').notNull().references(() => organizations.id),
   teacherId: text('teacher_id').notNull().references(() => teachers.id),
@@ -200,11 +291,11 @@ export const lessons = sqliteTable('daily_lessons', {
   index('lessons_status_idx').on(t.organizationId, t.status),
 ]);
 
-// §19 daily_student_records – §28 PRESENT|LATE|ABSENT; §29 academic fields null when ABSENT; §63 snapshots
-export const records = sqliteTable('daily_student_records', {
+// §19 monthly_student_records – §28 PRESENT|LATE|ABSENT; §29 academic fields null when ABSENT; §63 snapshots
+export const records = sqliteTable('monthly_student_records', {
   id: id(),
   organizationId: text('organization_id').notNull().references(() => organizations.id),
-  dailyLessonId: text('daily_lesson_id').notNull().references(() => lessons.id, { onDelete: 'cascade' }),
+  monthlyLessonId: text('monthly_lesson_id').notNull().references(() => lessons.id, { onDelete: 'cascade' }),
   studentId: text('student_id').notNull().references(() => students.id),
   studentNameSnapshot: text('student_name_snapshot'),
   studentCodeSnapshot: text('student_code_snapshot'),
@@ -218,7 +309,7 @@ export const records = sqliteTable('daily_student_records', {
   createdAt: stamp(),
   updatedAt: updated(),
 }, t => [
-  uniqueIndex('record_lesson_student').on(t.dailyLessonId, t.studentId),
+  uniqueIndex('record_lesson_student').on(t.monthlyLessonId, t.studentId),
   index('records_student_idx').on(t.organizationId, t.studentId),
 ]);
 
@@ -275,6 +366,55 @@ export const monthlyRuleSnapshots = sqliteTable('monthly_rule_snapshots', {
   createdAt: stamp(),
 }, t => [
   uniqueIndex('rule_snapshot_month_idx').on(t.organizationId, t.month),
+]);
+
+// §193 monthly record entry – one row per class+subject+month replaces per-lesson observations.
+// The header holds sessions, topics and name snapshots; per-student punctuality, levels and comments live in monthlyStudentEntries.
+export const monthlyEntries = sqliteTable('monthly_entries', {
+  id: id(),
+  organizationId: text('organization_id').notNull().references(() => organizations.id),
+  classId: text('class_id').notNull().references(() => classes.id),
+  subjectId: text('subject_id').notNull().references(() => subjects.id),
+  academicYearId: text('academic_year_id').references(() => academicYears.id),
+  teacherId: text('teacher_id').notNull().references(() => teachers.id),
+  month: text('month').notNull(),
+  sessionsHeld: integer('sessions_held').notNull().default(20),
+  topics: text('topics').notNull().default(''),
+  status: text('status').notNull().default('DRAFT'),
+  classNameSnapshot: text('class_name_snapshot'),
+  subjectNameSnapshot: text('subject_name_snapshot'),
+  teacherNameSnapshot: text('teacher_name_snapshot'),
+  createdAt: stamp(),
+  updatedAt: updated(),
+  submittedAt: integer('submitted_at', { mode: 'timestamp' }),
+  reviewedAt: integer('reviewed_at', { mode: 'timestamp' }),
+  reviewedBy: text('reviewed_by'),
+  reviewComment: text('review_comment'),
+}, t => [
+  uniqueIndex('monthly_entry_unique').on(t.organizationId, t.classId, t.subjectId, t.month),
+  index('monthly_entry_status_idx').on(t.organizationId, t.status),
+  index('monthly_entry_class_month_idx').on(t.classId, t.month),
+]);
+
+export const monthlyStudentEntries = sqliteTable('monthly_student_entries', {
+  id: id(),
+  organizationId: text('organization_id').notNull().references(() => organizations.id),
+  monthlyEntryId: text('monthly_entry_id').notNull().references(() => monthlyEntries.id, { onDelete: 'cascade' }),
+  studentId: text('student_id').notNull().references(() => students.id),
+  studentNameSnapshot: text('student_name_snapshot'),
+  studentCodeSnapshot: text('student_code_snapshot'),
+  // §193 v2: attendance is one punctuality select instead of three percentages.
+  punctuality: text('punctuality'),
+  performance: text('performance'),
+  participation: text('participation'),
+  homework: text('homework'),
+  conduct: text('conduct'),
+  comment: text('comment'),
+  createdAt: stamp(),
+  updatedAt: updated(),
+}, t => [
+  uniqueIndex('monthly_student_unique').on(t.monthlyEntryId, t.studentId),
+  index('monthly_student_org_idx').on(t.organizationId, t.studentId),
 ]);
 
 // §76 behaviour_observations – optional; categories per spec

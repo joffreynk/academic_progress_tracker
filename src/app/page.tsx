@@ -43,10 +43,12 @@ import StudentProfileModal from '@/components/StudentProfileModal';
 import DataQualityView from '@/components/DataQualityView';
 import StatisticsView from '@/components/StatisticsView';
 import BehaviourView from '@/components/BehaviourView';
+import ClubsView from '@/components/ClubsView';
+import MonthlyEntryView from '@/components/MonthlyEntryView';
 import PeriodPicker from '@/components/PeriodPicker';
-import { buildNormalRecordDefaults, resultTrend, type Observation, type Rules, type SubjectComparison } from '@/lib/reporting';
+import { resultTrend, type Observation, type Rules, type SubjectComparison } from '@/lib/reporting';
 import { thisMonthPeriod, buildPeriod, periodLabel, periodSlug, type Period } from '@/lib/period';
-import { downloadClassSummaryPdf } from '@/lib/reportPdf';
+import { downloadClassSummaryPdf, downloadClassReportsZip } from '@/lib/reportPdf';
 import { importFields, requiredImportFields, safeCsvCell, toCsv, type ImportKind } from '@/lib/importing';
 import { readImageFile, LOGO_ACCEPT } from '@/lib/logo';
 import { readImportFile } from '@/lib/importFile';
@@ -175,7 +177,7 @@ function LogoField({
   );
 }
 
-type User = { id: string; name: string; role: string; organizationId: string | null };
+type User = { id: string; name: string; username?: string; role: string; organizationId: string | null };
 type Assignment = { id: string; classId: string; className: string; subjectId: string; subjectName: string; academicYearId: string; yearName: string; teacherName: string };
 type Student = { id: string; studentId: string; fullName: string; firstName?: string; lastName?: string; classId: string; gradeId: string; academicYearId: string; status: string; className: string };
 type Ref = {
@@ -184,8 +186,9 @@ type Ref = {
   grades: { id: string; name: string; orderIndex: number; active?: boolean }[];
   classes: { id: string; name: string; gradeId: string; academicYearId: string; active?: boolean }[];
   subjects: { id: string; name: string; code: string; active?: boolean }[];
-  teachers: { id: string; name: string; email: string; teacherId: string; active: boolean; department?: string }[];
+  teachers: { id: string; name: string; email: string; teacherId: string; active: boolean; username?: string }[];
   assignments: { id: string; teacherId: string; classId: string; subjectId: string; academicYearId: string; active?: boolean }[];
+  students: { id: string; studentId: string; fullName: string; classId: string; gradeId: string; academicYearId: string; status: string }[];
   today: string;
   minDate: string;
   windowDays: number;
@@ -247,9 +250,8 @@ const fieldMap: Record<string, { key: string; label: string; type?: string; opti
     { key: 'teacherId', label: 'Teacher ID' },
     { key: 'name', label: 'Full name' },
     { key: 'email', label: 'Email', type: 'email' },
-    { key: 'department', label: 'Department (optional)' },
     { key: 'username', label: 'Login username' },
-    { key: 'password', label: 'Initial password (12+ characters)', type: 'password' },
+    { key: 'password', label: 'Initial password (6+ chars with A-Z, a-z, 0-9 and a symbol)', type: 'password' },
   ],
   assignment: [
     { key: 'teacherId', label: 'Teacher', options: 'teachers' },
@@ -289,6 +291,46 @@ async function post(action: string, data: unknown, extra: Record<string, unknown
 const resolve = ({ from, to }: { from: string; to: string }): Period | null => (from && to ? buildPeriod(from, to) : null);
 const periodText = (period: Period) => periodLabel(period);
 
+type OverviewData = {
+  organization: string;
+  today: string;
+  minDate: string;
+  windowDays: number;
+  counts: { students: number; teachers: number; classes: number; subjects: number; totalReports: number };
+  statusCounts: Record<string, number>;
+  assignedClasses: string[];
+  assignedSubjects: string[];
+  assignments: Assignment[];
+  recent: { id: string; lessonDate: string; topic: string; status: string; kind?: 'lesson' | 'monthly'; className: string; subjectName: string; teacherName: string }[];
+  reportsThisMonth?: number;
+  approvalRate?: number;
+  followUpCount?: number;
+  teacherMonthClasses?: number;
+  teacherMonthSubjects?: number;
+};
+
+const OVERVIEW_DEFAULTS: OverviewData = {
+  organization: '',
+  today: '',
+  minDate: '',
+  windowDays: 14,
+  counts: { students: 0, teachers: 0, classes: 0, subjects: 0, totalReports: 0 },
+  statusCounts: {},
+  assignedClasses: [],
+  assignedSubjects: [],
+  assignments: [],
+  recent: [],
+};
+
+const normalizeOverview = (o: Partial<OverviewData> | null | undefined): OverviewData => ({
+  ...OVERVIEW_DEFAULTS,
+  ...(o || {}),
+  counts: { ...OVERVIEW_DEFAULTS.counts, ...(o?.counts || {}) },
+  statusCounts: { ...(o?.statusCounts || {}) },
+  assignments: o?.assignments || [],
+  recent: o?.recent || [],
+});
+
 function Badge({ status }: { status: string }) {
   return <span className={`badge badge-${status.toLowerCase().replace(/_/g, '-')}`}>{status.replace('_', ' ')}</span>;
 }
@@ -323,6 +365,11 @@ const naCell = (notApplicable: boolean, control: React.ReactNode) =>
   notApplicable ? NOT_APPLICABLE : control;
 
 const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+
+const monthTag = (m: string) => {
+  if (!/^\d{4}-\d{2}$/.test(m || '')) return m;
+  return new Date(`${m}-01T12:00:00Z`).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+};
 
 const shiftDays = (date: string, days: number) => {
   const d = new Date(`${date}T12:00:00Z`);
@@ -370,23 +417,7 @@ const downloadCredentials = (credentials: GeneratedCredential[]) =>
 export default function Home() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [login, setLogin] = useState({ identifier: '', password: '' });
-  const [overview, setOverview] = useState<{
-    organization: string;
-    today: string;
-    minDate: string;
-    windowDays: number;
-    counts: { students: number; teachers: number; classes: number; subjects: number; totalReports: number };
-    statusCounts: Record<string, number>;
-    assignedClasses: string[];
-    assignedSubjects: string[];
-    assignments: Assignment[];
-    recent: { id: string; lessonDate: string; topic: string; status: string; className: string; subjectName: string; teacherName: string }[];
-    reportsThisMonth?: number;
-    approvalRate?: number;
-    followUpCount?: number;
-    teacherMonthClasses?: number;
-    teacherMonthSubjects?: number;
-  } | null>(null);
+  const [overview, setOverview] = useState<OverviewData | null>(null);
 
   const [ref, setRef] = useState<Ref | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
@@ -394,11 +425,7 @@ export default function Home() {
   const [studentsHasMore, setStudentsHasMore] = useState(false);
   const [selectedClass, setSelectedClass] = useState('');
   const [selectedSubject, setSelectedSubject] = useState('');
-  const [date, setDate] = useState('');
-  const [topic, setTopic] = useState('');
-  const [lessonId, setLessonId] = useState<string | null>(null);
-  const [records, setRecords] = useState<Record<string, { attendance: string; performance: string; conduct: string; punctuality: string; homework: string; participation: string; comment: string }>>({});
-  const [reports, setReports] = useState<{ id: string; lessonDate: string; topic: string; status: string; className: string; subjectName: string; teacherName: string; reviewComment?: string | null; recordsCount?: number; rosterCount?: number; completionRate?: number }[]>([]);
+  const [reports, setReports] = useState<{ id: string; lessonDate: string; topic: string; status: string; className: string; subjectName: string; teacherName: string; reviewComment?: string | null; recordsCount?: number; rosterCount?: number; completionRate?: number; kind?: 'lesson' | 'monthly'; month?: string }[]>([]);
   
   // History filter state
   const [reportFilterClass, setReportFilterClass] = useState('');
@@ -407,17 +434,19 @@ export default function Home() {
   const [reportFilterPeriod, setReportFilterPeriod] = useState({ from: '', to: '' });
 
   const [reviewDetail, setReviewDetail] = useState<{ lesson: any; records: any[] } | null>(null);
+  const [monthlyReviewDetail, setMonthlyReviewDetail] = useState<any | null>(null);
+  const [monthlyEntryTarget, setMonthlyEntryTarget] = useState<string | null>(null);
+  const [monthlyEntryPrefill, setMonthlyEntryPrefill] = useState<{ classId: string; subjectId: string } | null>(null);
   const [studentProfile, setStudentProfile] = useState<{ student: any; timeline: any[]; significant: any[] } | null>(null);
   const [page, setPage] = useState('overview');
   const [search, setSearch] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [lessonValidationAttempted, setLessonValidationAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [entity, setEntity] = useState('year');
   const [form, setForm] = useState<Record<string, any>>({});
   const [config, setConfig] = useState<{ settings: any; closures: { month: string; closed: boolean }[]; organization: any } | null>(null);
-  const [organizations, setOrganizations] = useState<{ id: string; name: string; code: string; domain: string | null; logoUrl: string | null; timezone: string; active: boolean; primaryAdminUserId: string | null; studentCount?: number; teacherCount?: number; classCount?: number }[]>([]);
+  const [organizations, setOrganizations] = useState<{ id: string; name: string; code: string; domain: string | null; logoUrl: string | null; timezone: string; active: boolean; primaryAdminUserId: string | null; studentCount?: number; teacherCount?: number; classCount?: number; admin?: { id: string; name: string; username: string; email: string } | null }[]>([]);
   const [orgForm, setOrgForm] = useState({ name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true });
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [mobile, setMobile] = useState(false);
@@ -433,6 +462,7 @@ export default function Home() {
   const [monthlyTeacher, setMonthlyTeacher] = useState('');
   const [monthlySortCol, setMonthlySortCol] = useState<string>('studentName');
   const [monthlySortDir, setMonthlySortDir] = useState<'asc' | 'desc'>('asc');
+  const [monthlySearch, setMonthlySearch] = useState('');
   const [monthly, setMonthly] = useState<{ organization: string; period: Period; closedMonths: string[]; rules: Rules; summaries: Summary[]; comparison: SubjectComparison[]; raw: Observation[] } | null>(null);
 
   // Import state
@@ -456,6 +486,7 @@ export default function Home() {
 
   // Modal state
   const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
+  const [accountUsername, setAccountUsername] = useState<string | null>(null);
   const [logoOk, setLogoOk] = useState(true);
   const [loginLogo, setLoginLogo] = useState<string | null>(null);
 
@@ -473,11 +504,10 @@ export default function Home() {
 
   const refresh = async () => {
     const [o, r] = await Promise.all([api('overview'), api('reference').catch(() => null)]);
-    setOverview(o);
+    setOverview(normalizeOverview(o));
     const today = o?.today || r?.today;
     if (r) {
       setRef(r);
-      setDate((d) => d || today);
       setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(today).from, to: today }));
     }
   };
@@ -522,14 +552,13 @@ export default function Home() {
   useEffect(() => {
     if (!user) return;
     api('overview')
-      .then(setOverview)
+      .then((o) => setOverview(normalizeOverview(o)))
       .catch((e) => setError(e.message));
     api('reference')
       .then((r) => {
         if (r) {
           setRef(r);
           const today = r.today || overview?.today;
-          setDate((d) => d || today);
           setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(today).from, to: today }));
         }
       })
@@ -578,24 +607,6 @@ export default function Home() {
     }
   }, [page, user, selectedClass, search, studentPage, reportFilterClass, reportFilterSubject, reportFilterStatus, reportFilterPeriod.from, reportFilterPeriod.to]);
 
-  useEffect(() => {
-    if (page === 'new' && selectedClass && ref) {
-      api('students', { classId: selectedClass, roster: '1' })
-        .then((d) => {
-          setStudents(d.students);
-          setRecords((prev) => {
-            const next = { ...prev };
-            d.students.forEach((s: Student) => {
-              if (!next[s.id]) {
-                next[s.id] = buildNormalRecordDefaults();
-              }
-            });
-            return next;
-          });
-        })
-        .catch((e) => setError(e.message));
-    }
-  }, [page, selectedClass, ref]);
 
   const doLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -630,6 +641,18 @@ export default function Home() {
     });
   };
 
+  const changeMyPassword = async (current: string, password: string) => {
+    const res = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'password', current, password }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw Error(body?.error || 'Password change failed.');
+    alert('Password changed. Please sign in again.');
+    window.location.reload();
+  };
+
   const activeYear = ref?.years?.find((y) => y.active) || ref?.years?.[0];
 
   const currentClassAssignment = useMemo(() => {
@@ -660,121 +683,30 @@ export default function Home() {
     return Math.max(1, Math.ceil(total / teacherPageSize));
   }, [ref?.teachers, teacherPageSize, teacherSearch]);
 
-  // Open existing lesson for editing or review
+  // Open a legacy dated report read-only (capture UI is monthly-only after the merge)
   const openLesson = (id: string) => {
     run(async () => {
-      const data = await api('lesson', { id });
-      if (user?.role === 'TEACHER') {
-        setLessonId(data.lesson.id);
-        setSelectedClass(data.lesson.classId);
-        setSelectedSubject(data.lesson.subjectId);
-        setDate(data.lesson.lessonDate);
-        setTopic(data.lesson.topic);
-        const map: Record<string, any> = {};
-        data.records.forEach((r: any) => {
-          map[r.studentId] = {
-            attendance: r.attendanceStatus,
-            performance: r.performance || 'GOOD',
-            conduct: r.conduct || 'GOOD',
-            punctuality: r.punctuality || 'ALWAYS_ON_TIME',
-            homework: r.homework || 'ALWAYS_COMPLETED',
-            participation: r.participation || 'ACTIVE',
-            comment: r.comment || '',
-          };
-        });
-        setRecords(map);
-        setPage('new');
-      } else {
-        setReviewDetail(data);
-      }
+      setReviewDetail(await api('monthlyLesson', { id }));
     });
   };
 
-  // Submit report handler triggering Modal
-  const initiateSubmitLesson = (isSubmit: boolean) => {
-    setLessonValidationAttempted(true);
-    const academicYearId = activeYear?.id;
-    const missing: string[] = [];
-    if (!academicYearId) missing.push('active academic year');
-    if (!selectedClass) missing.push('class');
-    if (!selectedSubject) missing.push('subject');
-    if (!date) missing.push('lesson date');
-    if (!topic.trim()) missing.push('lesson topic');
-    if (missing.length) {
-      setError(`Please complete the following before continuing: ${missing.join(', ')}.`);
+  // Open a report row: legacy lesson reports open read-only, monthly records open the monthly flow (§193)
+  const openReport = (r: any) => {
+    if (r.kind !== 'monthly') { openLesson(r.id); return; }
+    if (user?.role === 'TEACHER') {
+      setMonthlyEntryTarget(r.id);
+      setPage('monthlyRecord');
       return;
     }
-    const studentList = students.filter((s) => s.classId === selectedClass);
-    if (isSubmit && studentList.length === 0) {
-      setError('Cannot submit empty class roster.');
-      return;
-    }
-
-    const recs = studentList.map((s) => {
-      const r = records[s.id] || { attendance: 'PRESENT', performance: 'GOOD', conduct: 'GOOD', punctuality: 'ALWAYS_ON_TIME', homework: 'ALWAYS_COMPLETED', participation: 'ACTIVE', comment: '' };
-      return {
-        studentId: s.id,
-        attendanceStatus: r.attendance as any,
-        performance: r.attendance === 'ABSENT' ? null : (r.performance as any),
-        conduct: r.attendance === 'ABSENT' ? null : (r.conduct as any),
-        punctuality: r.attendance === 'ABSENT' ? null : (r.punctuality as any),
-        homework: r.attendance === 'ABSENT' ? null : (r.homework as any),
-        participation: r.attendance === 'ABSENT' ? null : (r.participation as any),
-        comment: r.comment.trim() || null,
-      };
+    run(async () => {
+      setMonthlyReviewDetail(await api('monthlyEntry', { entryId: r.id }));
     });
-
-    const presentCount = recs.filter((r) => r.attendanceStatus === 'PRESENT').length;
-    const lateCount = recs.filter((r) => r.attendanceStatus === 'LATE').length;
-    const absentCount = recs.filter((r) => r.attendanceStatus === 'ABSENT').length;
-
-    const commitSave = (submitFlag: boolean) => {
-      run(async () => {
-        const payload = {
-          id: lessonId || undefined,
-          classId: selectedClass,
-          subjectId: selectedSubject,
-          academicYearId,
-          lessonDate: date,
-          topic: topic.trim(),
-          submit: submitFlag,
-          records: recs,
-        };
-        const res = await post('saveLesson', payload);
-        setNotice(submitFlag ? 'Report submitted successfully for administrative review.' : 'Draft report saved successfully.');
-        setLessonId(res.lesson.id);
-        if (submitFlag) {
-          setPage('reports');
-          setLessonId(null);
-          setTopic('');
-        }
-        await refresh();
-      });
-    };
-
-    if (isSubmit) {
-      const clsName = ref?.classes.find((c) => c.id === selectedClass)?.name || selectedClass;
-      const subName = ref?.subjects.find((s) => s.id === selectedSubject)?.name || selectedSubject;
-      setModalConfig({
-        type: 'submit',
-        title: 'Confirm Daily Report Submission',
-        className: clsName,
-        subjectName: subName,
-        date,
-        total: studentList.length,
-        present: presentCount,
-        late: lateCount,
-        absent: absentCount,
-        onConfirm: () => commitSave(true),
-      });
-    } else {
-      commitSave(false);
-    }
   };
 
   // Review status transitions (Admin)
   const transitionReview = (id: string, newStatus: string) => {
-    if (newStatus === 'RETURNED' || (reviewDetail?.lesson.status === 'APPROVED' && newStatus === 'SUBMITTED')) {
+    const reviewingStatus = monthlyReviewDetail?.entry?.status || reviewDetail?.lesson?.status;
+    if (newStatus === 'RETURNED' || (reviewingStatus === 'APPROVED' && newStatus === 'SUBMITTED')) {
       setModalConfig({
         type: 'reason',
         title: newStatus === 'RETURNED' ? 'Return Report for Revision' : 'Reopen Approved Report',
@@ -785,6 +717,7 @@ export default function Home() {
             await post('review', { id, status: newStatus, comment: reason });
             setNotice('Report status updated.');
             setReviewDetail(null);
+            setMonthlyReviewDetail(null);
             await refresh();
           });
         },
@@ -794,6 +727,7 @@ export default function Home() {
         await post('review', { id, status: newStatus });
         setNotice(`Report marked as ${newStatus.replace('_', ' ')}.`);
         setReviewDetail(null);
+        setMonthlyReviewDetail(null);
         await refresh();
       });
     }
@@ -820,11 +754,13 @@ export default function Home() {
   };
 
   // Delete draft action
-  const initiateDeleteDraft = (id: string) => {
+  const initiateDeleteDraft = (id: string, kind: 'lesson' | 'monthly' = 'lesson') => {
     setModalConfig({
       type: 'confirm',
       title: 'Delete Draft Report',
-      message: 'Are you sure you want to permanently delete this draft lesson report?',
+      message: kind === 'monthly'
+        ? 'Are you sure you want to permanently delete this draft monthly record?'
+        : 'Are you sure you want to permanently delete this draft lesson report?',
       isDanger: true,
       confirmLabel: 'Delete Draft',
       onConfirm: () => {
@@ -877,6 +813,37 @@ export default function Home() {
     });
   }, [monthly, monthlySortCol, monthlySortDir]);
 
+  // Statistics auto-loads the default period instead of showing an empty state.
+  useEffect(() => {
+    if (page !== 'statistics' || monthly || !ref) return;
+    const today = ref.today;
+    const period = thisMonthPeriod(today);
+    if (!period) return;
+    let cancelled = false;
+    api('monthly', { from: period.from, to: period.to })
+      .then((d: any) => {
+        if (cancelled) return;
+        setMonthly({
+          organization: d.organization,
+          period: d.period,
+          closedMonths: d.closedMonths ?? [],
+          rules: d.rules,
+          summaries: d.summaries,
+          comparison: d.comparison ?? [],
+          raw: d.data ?? [],
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [page, monthly, ref]);
+
+  // Search box (inside MonthlyOverview) filters the summary table above it.
+  const visibleSummaries = useMemo(() => {
+    const q = monthlySearch.trim().toLowerCase();
+    if (!q) return sortedSummaries;
+    return sortedSummaries.filter((s) => `${s.studentName} ${s.studentCode} ${s.className} ${s.subjectName}`.toLowerCase().includes(q));
+  }, [sortedSummaries, monthlySearch]);
+
   const toggleMonthlySort = (col: string) => {
     if (monthlySortCol === col) {
       setMonthlySortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -893,7 +860,7 @@ export default function Home() {
     const book = new Excel.Workbook();
     const sheet = book.addWorksheet(fullClass ? 'Full Class Follow-Up' : 'Subject Follow-Up');
 
-    sheet.addRow([fullClass ? 'CLASS MONTHLY STUDENT ACADEMIC & BEHAVIOURAL FOLLOW-UP' : 'CLASS SUBJECT MONTHLY REPORT']);
+    sheet.addRow([fullClass ? 'MONTHLY CLASS ACADEMIC PROGRESS REPORT' : 'CLASS SUBJECT MONTHLY REPORT']);
     sheet.addRow([monthly.organization, `Reporting Period: ${periodText(monthly.period)}`]);
     sheet.addRow([
       'Student Name',
@@ -902,10 +869,7 @@ export default function Home() {
       'Subject',
       'Teacher',
       'Lessons',
-      'Present',
-      'Late',
-      'Absent',
-      'Attendance %',
+      'Punctuality',
       'Performance Level',
       'Classroom Participation',
       'Homework Status',
@@ -920,10 +884,7 @@ export default function Home() {
         s.subjectName,
         s.teacherName || '—',
         s.lessons,
-        s.attendance.PRESENT || 0,
-        s.attendance.LATE || 0,
-        s.attendance.ABSENT || 0,
-        s.attendanceRate !== null ? `${s.attendanceRate}%` : '—',
+        s.punctualityResult,
         pretty(s.performanceResult),
         s.participationResult,
         s.homeworkResult,
@@ -946,7 +907,7 @@ export default function Home() {
 
   const exportMonthlyCsv = () => {
     if (!monthly) return;
-    const headers = ['Student ID', 'Student Name', 'Class', 'Subject', 'Teacher', 'Lessons', 'Present', 'Late', 'Absent', 'Attendance %', 'Performance', 'Participation', 'Homework', 'Conduct'];
+    const headers = ['Student ID', 'Student Name', 'Class', 'Subject', 'Teacher', 'Lessons', 'Punctuality', 'Performance', 'Participation', 'Homework', 'Conduct'];
     const rows = sortedSummaries.map((s) => [
       `"${s.studentCode}"`,
       `"${s.studentName}"`,
@@ -954,10 +915,7 @@ export default function Home() {
       `"${s.subjectName}"`,
       `"${s.teacherName || ''}"`,
       s.lessons,
-      s.attendance.PRESENT || 0,
-      s.attendance.LATE || 0,
-      s.attendance.ABSENT || 0,
-      `"${s.attendanceRate ?? ''}%"`,
+      `"${s.punctualityResult}"`,
       `"${pretty(s.performanceResult)}"`,
       `"${s.participationResult}"`,
       `"${s.homeworkResult}"`,
@@ -985,16 +943,20 @@ export default function Home() {
 
   const createEntity = () => {
     const missing = (fieldMap[entity] || [])
-      .filter((f) => f.key !== 'department' && !String(form[f.key] ?? '').trim())
+      .filter((f) => !String(form[f.key] ?? '').trim())
       .map((f) => f.label);
     if (missing.length) {
       setError(`Complete ${missing.join(', ')} before creating.`);
       return;
     }
     run(async () => {
-      await post('create', form, { type: entity });
+      const res = await post('create', form, { type: entity });
       setForm({});
-      setNotice(`${pretty(entity)} created successfully.`);
+      setNotice(
+        res?.reassignedFrom?.length
+          ? `${pretty(entity)} created — removed from ${res.reassignedFrom.join(', ')}.`
+          : `${pretty(entity)} created successfully.`
+      );
       await refresh();
     });
   };
@@ -1036,7 +998,7 @@ export default function Home() {
       fields = [
         { key: 'name', label: 'Full Name', value: item.name },
         { key: 'email', label: 'Email', type: 'email', value: item.email },
-        { key: 'department', label: 'Department', value: item.department || '' },
+        { key: 'username', label: 'Username', value: item.username || '' },
         { key: 'active', label: 'Active Status', type: 'checkbox', value: item.active },
       ];
     } else if (type === 'student') {
@@ -1065,8 +1027,12 @@ export default function Home() {
       fields,
       onConfirm: (vals) => {
         run(async () => {
-          await post('updateEntity', { id: item.id, ...vals }, { type });
-          setNotice(`${pretty(type)} updated successfully.`);
+          const res = await post('updateEntity', { id: item.id, ...vals }, { type });
+          setNotice(
+            res?.reassignedFrom?.length
+              ? `${pretty(type)} updated — removed from ${res.reassignedFrom.join(', ')}.`
+              : `${pretty(type)} updated successfully.`
+          );
           await refresh();
         });
       },
@@ -1082,7 +1048,7 @@ export default function Home() {
       confirmLabel: 'Confirm Removal',
       onConfirm: () => {
         run(async () => {
-          await post('deleteEntity', { id }, { type });
+          await post('deleteEntity', undefined, { type, id });
           setNotice(`${pretty(type)} removed or deactivated.`);
           await refresh();
         });
@@ -1142,26 +1108,29 @@ export default function Home() {
     if (user.role === 'ADMIN') {
       return [
         { id: 'overview', icon: LayoutDashboard, title: 'Overview' },
-        { id: 'reports', icon: ClipboardList, title: 'Daily Reports' },
+        { id: 'reports', icon: ClipboardList, title: 'Reports' },
+        { id: 'monthlyRecord', icon: FilePlus2, title: 'Monthly Record' },
         { id: 'students', icon: GraduationCap, title: 'Students' },
         { id: 'monthly', icon: CalendarDays, title: 'Monthly Reports' },
         { id: 'statistics', icon: BarChart3, title: 'Statistics' },
         { id: 'quality', icon: ShieldAlert, title: 'Data Quality' },
         { id: 'behaviour', icon: AlertCircle, title: 'Behaviour Log' },
+        { id: 'clubs', icon: Users, title: 'Clubs' },
         { id: 'manage', icon: Layers3, title: 'Management' },
         { id: 'import', icon: Download, title: 'Import' },
         { id: 'settings', icon: Settings, title: 'Settings' },
         { id: 'audit', icon: ShieldCheck, title: 'Audit' },
       ];
     }
-    // Teacher
+    // Teacher — the only capture path after the merge is the monthly record (§193)
     return [
       { id: 'overview', icon: LayoutDashboard, title: 'Overview' },
-      { id: 'new', icon: FilePlus2, title: 'New Report' },
+      { id: 'monthlyRecord', icon: FilePlus2, title: 'Monthly Record' },
       { id: 'reports', icon: ClipboardList, title: 'Report History' },
       { id: 'monthly', icon: CalendarDays, title: 'Monthly Reports' },
       { id: 'students', icon: GraduationCap, title: 'Class Rosters' },
       { id: 'behaviour', icon: AlertCircle, title: 'Behaviour Log' },
+      { id: 'clubs', icon: Users, title: 'Clubs' },
     ];
   }, [user]);
 
@@ -1182,7 +1151,7 @@ export default function Home() {
               <GraduationCap size={36} color="#0f766e" />
             )}
             <h1>Academic &amp; Behaviour reporting</h1>
-            <p>Unified Daily Lesson Capture &amp; Deterministic Monthly Follow-Up</p>
+            <p>Monthly Reporting &amp; Deterministic Follow-Up</p>
           </div>
           {error && <div className="notice-banner" style={{ background: '#fef2f2', color: '#991b1b', marginBottom: 16 }}>{error}</div>}
           <form onSubmit={doLogin} className="login-form">
@@ -1295,6 +1264,12 @@ export default function Home() {
                 <Clock3 size={13} /> {overview.today}
               </span>
             )}
+            <button
+              className="btn outline"
+              onClick={() => setModalConfig({ type: 'change_password', onConfirm: changeMyPassword })}
+              title="Change Password">
+              <LockKeyhole size={14} />
+            </button>
             <button className="btn outline"               onClick={() =>
                 run(async () => {
                   await refresh();
@@ -1321,10 +1296,10 @@ export default function Home() {
               <div className="welcome-banner" style={{ marginBottom: 20 }}>
                 <div>
                   <span className="banner-kicker">WELCOME BACK, {user.name.toUpperCase()}</span>
-                  <h1>{overview.organization} Daily Academic Portal</h1>
+                  <h1>{overview.organization} Monthly Academic Portal</h1>
                   <p>
                     {user.role === 'TEACHER'
-                      ? 'Record daily lesson attendance, performance, participation, homework, and conduct within the 14-day policy window.'
+                      ? `File each class-subject monthly record with punctuality, performance, participation, homework, and conduct.`
                       : 'School-wide tracking, review queues, compliance auditing, and deterministic monthly reporting.'}
                   </p>
                 </div>
@@ -1336,23 +1311,23 @@ export default function Home() {
                   <div className="stat-grid" style={{ marginBottom: 20 }}>
                     <div className="stat-card">
                       <div className="stat-label">Total Students</div>
-                      <div className="stat-value">{overview.counts.students}</div>
+                      <div className="stat-value">{overview.counts?.students ?? 0}</div>
                       <small style={{ color: '#748792' }}>Active enrolled</small>
                     </div>
                     <div className="stat-card">
                       <div className="stat-label">Faculty Teachers</div>
-                      <div className="stat-value">{overview.counts.teachers}</div>
+                      <div className="stat-value">{overview.counts?.teachers ?? 0}</div>
                       <small style={{ color: '#748792' }}>Active accounts</small>
                     </div>
                     <div className="stat-card">
                       <div className="stat-label">Classes Configured</div>
-                      <div className="stat-value">{overview.counts.classes}</div>
+                      <div className="stat-value">{overview.counts?.classes ?? 0}</div>
                       <small style={{ color: '#748792' }}>Active cohorts</small>
                     </div>
                     <div className="stat-card">
-                      <div className="stat-label">Total Lessons Recorded</div>
-                      <div className="stat-value">{overview.counts.totalReports}</div>
-                      <small style={{ color: '#748792' }}>All-time lessons</small>
+                      <div className="stat-label">Total Records Filed</div>
+                      <div className="stat-value">{overview.counts?.totalReports ?? 0}</div>
+                      <small style={{ color: '#748792' }}>All-time submissions</small>
                     </div>
                     <div className="stat-card">
                       <div className="stat-label">Approval Rate</div>
@@ -1370,19 +1345,19 @@ export default function Home() {
                   <div className="stat-grid" style={{ marginBottom: 24, gridTemplateColumns: 'repeat(4, 1fr)' }}>
                     <div className="stat-card">
                       <div className="stat-label">Draft Reports</div>
-                      <div className="stat-value" style={{ color: '#748792' }}>{overview.statusCounts.DRAFT || 0}</div>
+                      <div className="stat-value" style={{ color: '#748792' }}>{overview.statusCounts?.DRAFT ?? 0}</div>
                     </div>
                     <div className="stat-card">
                       <div className="stat-label">Submitted Reports</div>
-                      <div className="stat-value" style={{ color: '#3b82f6' }}>{overview.statusCounts.SUBMITTED || 0}</div>
+                      <div className="stat-value" style={{ color: '#3b82f6' }}>{overview.statusCounts?.SUBMITTED ?? 0}</div>
                     </div>
                     <div className="stat-card">
                       <div className="stat-label">Approved Reports</div>
-                      <div className="stat-value" style={{ color: '#22a57d' }}>{overview.statusCounts.APPROVED || 0}</div>
+                      <div className="stat-value" style={{ color: '#22a57d' }}>{overview.statusCounts?.APPROVED ?? 0}</div>
                     </div>
                     <div className="stat-card">
                       <div className="stat-label">Returned Reports</div>
-                      <div className="stat-value" style={{ color: '#c67a53' }}>{overview.statusCounts.RETURNED || 0}</div>
+                      <div className="stat-value" style={{ color: '#c67a53' }}>{overview.statusCounts?.RETURNED ?? 0}</div>
                     </div>
                   </div>
                 </>
@@ -1398,25 +1373,25 @@ export default function Home() {
                   </div>
                   <div className="stat-card">
                     <div className="stat-label">Pending Drafts</div>
-                    <div className="stat-value" style={{ color: overview.statusCounts.DRAFT ? '#d79c41' : '#748792' }}>
-                      {overview.statusCounts.DRAFT || 0}
+                    <div className="stat-value" style={{ color: overview.statusCounts?.DRAFT ? '#d79c41' : '#748792' }}>
+                      {overview.statusCounts?.DRAFT ?? 0}
                     </div>
                     <small style={{ color: '#748792' }}>Awaiting completion</small>
                   </div>
                   <div className="stat-card">
                     <div className="stat-label">Submitted</div>
-                    <div className="stat-value" style={{ color: '#3b82f6' }}>{overview.statusCounts.SUBMITTED || 0}</div>
+                    <div className="stat-value" style={{ color: '#3b82f6' }}>{overview.statusCounts?.SUBMITTED ?? 0}</div>
                     <small style={{ color: '#748792' }}>In administrative review</small>
                   </div>
                   <div className="stat-card">
                     <div className="stat-label">Approved</div>
-                    <div className="stat-value" style={{ color: '#22a57d' }}>{overview.statusCounts.APPROVED || 0}</div>
+                    <div className="stat-value" style={{ color: '#22a57d' }}>{overview.statusCounts?.APPROVED ?? 0}</div>
                     <small style={{ color: '#748792' }}>Approved by admin</small>
                   </div>
                   <div className="stat-card">
                     <div className="stat-label">Returned</div>
-                    <div className="stat-value" style={{ color: overview.statusCounts.RETURNED ? '#c67a53' : '#22a57d' }}>
-                      {overview.statusCounts.RETURNED || 0}
+                    <div className="stat-value" style={{ color: overview.statusCounts?.RETURNED ? '#c67a53' : '#22a57d' }}>
+                      {overview.statusCounts?.RETURNED ?? 0}
                     </div>
                     <small style={{ color: '#748792' }}>Needs your correction</small>
                   </div>
@@ -1451,13 +1426,11 @@ export default function Home() {
                               className="btn primary"
                               style={{ fontSize: 12, padding: '6px 10px' }}
                               onClick={() => {
-                                setSelectedClass(a.classId);
-                                setSelectedSubject(a.subjectId);
-                                setLessonValidationAttempted(false);
-                                setPage('new');
+                                setMonthlyEntryPrefill({ classId: a.classId, subjectId: a.subjectId });
+                                setPage('monthlyRecord');
                               }}
                             >
-                              <FilePlus2 size={13} /> New Report
+                              <FilePlus2 size={13} /> Monthly Record
                             </button>
                             <button
                               className="btn outline"
@@ -1503,15 +1476,15 @@ export default function Home() {
               <div className="panel">
                 <div className="list-toolbar">
                   <div>
-                    <h2>Recent Daily Lesson Activity</h2>
-                    <p>Chronological feed of latest recorded lessons</p>
+                  <h2>Recent Report Activity</h2>
+                  <p>Chronological feed of latest recorded reports</p>
                   </div>
                   <button className="btn outline" onClick={() => setPage('reports')}>
                     View All Reports <ChevronRight size={14} />
                   </button>
                 </div>
                 {!overview.recent?.length ? (
-                  <Empty title="No recent lessons" detail="Recorded lessons will appear here." />
+                  <Empty title="No recent reports" detail="Recorded reports will appear here." />
                 ) : (
                   <div className="table-scroll">
                     <table>
@@ -1536,7 +1509,7 @@ export default function Home() {
                             <td style={{ maxWidth: 220 }}>{l.topic}</td>
                             <td><Badge status={l.status} /></td>
                             <td>
-                              <button className="btn outline" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => openLesson(l.id)}>
+                              <button className="btn outline" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => { setPage('reports'); openReport(l); }}>
                                 Open
                               </button>
                             </td>
@@ -1550,331 +1523,34 @@ export default function Home() {
             </div>
           )}
 
-          {/* ================= PAGE: NEW REPORT (TEACHER) ================= */}
-          {page === 'new' && user.role === 'TEACHER' && (
-            <div className="panel form-panel">
-              <div className="list-toolbar">
-                <div>
-                  <div className="eyebrow">DAILY LESSON CAPTURE</div>
-                  <h2>{lessonId ? 'Edit Lesson Report' : 'Record Daily Lesson'}</h2>
-                  <p>
-                    Policy window: {ref?.minDate} to {ref?.today} (
-                    {dayLabel(ref?.windowDays ?? 14)} inclusive)
-                  </p>
-                </div>
-                {lessonId && (
-                  <button
-                    className="btn outline"
-                    onClick={() => {
-                      setLessonId(null);
-                      setTopic('');
-                      setLessonValidationAttempted(false);
-                    }}
-                  >
-                    Start New Report
-                  </button>
-                )}
-              </div>
-
-              {/* Top Selector Grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-                <label>
-                  Class
-                  <select
-                    value={selectedClass}
-                    onChange={(e) => {
-                      setSelectedClass(e.target.value);
-                      setSelectedSubject('');
-                      setLessonValidationAttempted(false);
-                    }}
-                  >
-                    <option value="">Select Class</option>
-                    {[...new Set(overview?.assignments.map((a) => a.classId))].map((cid) => {
-                      const a = overview?.assignments.find((x) => x.classId === cid);
-                      return <option key={cid} value={cid}>{a?.className}</option>;
-                    })}
-                  </select>
-                </label>
-                <label>
-                  Subject
-                  <select
-                    value={selectedSubject}
-                    disabled={!selectedClass}
-                    onChange={(e) => setSelectedSubject(e.target.value)}
-                  >
-                    <option value="">Select Subject</option>
-                    {overview?.assignments
-                      .filter((a) => a.classId === selectedClass)
-                      .map((a) => (
-                        <option key={a.subjectId} value={a.subjectId}>{a.subjectName}</option>
-                      ))}
-                  </select>
-                </label>
-                <label>
-                  Lesson Date
-                  <input
-                    type="date"
-                    min={ref?.minDate}
-                    max={ref?.today}
-                    value={date}
-                    onChange={(e) => setDate(e.target.value)}
-                  />
-                  <small style={{ color: '#748792', fontSize: 11, fontWeight: 600 }}>
-                    Allowed range: {ref?.minDate || '—'} to {ref?.today || '—'} · You can record
-                    lessons from the last {dayLabel(ref?.windowDays ?? 14)} up to today.
-                  </small>
-                </label>
-              </div>
-
-              <label style={{ marginBottom: 16 }}>
-                Lesson Topic / Content Covered <span style={{ color: '#c0392b' }}>*</span>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Chapter 4: Linear equations and problem solving..."
-                  value={topic}
-                  onChange={(e) => setTopic(e.target.value)}
-                  style={
-                    lessonValidationAttempted && !topic.trim()
-                      ? { borderColor: '#c67a53', background: '#fffaf6' }
-                      : undefined
-                  }
-                />
-                {lessonValidationAttempted && !topic.trim() && (
-                  <small style={{ color: '#c67a53', fontWeight: 600 }}>
-                    Required — enter the lesson topic before saving or submitting.
-                  </small>
-                )}
-              </label>
-
-              {/* Student Observations Table */}
-              {selectedClass && (
-                <div style={{ marginTop: 20 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                    <h3>Student Observations ({students.filter((s) => s.classId === selectedClass).length} Students)</h3>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button
-                        className="btn outline"
-                        style={{ fontSize: 12 }}
-                        onClick={() => {
-                          setRecords((prev) => {
-                            const next = { ...prev };
-                            students.filter((s) => s.classId === selectedClass).forEach((s) => {
-                              next[s.id] = { ...buildNormalRecordDefaults(), comment: '' };
-                            });
-                            return next;
-                          });
-                        }}
-                      >
-                        SET ALL NORMAL
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="table-scroll">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Student</th>
-                          <th>Attendance</th>
-                          <th>Academic Performance</th>
-                          <th>Class Conduct</th>
-                          <th>Punctuality</th>
-                          <th>Homework & Assignments</th>
-                          <th>Participation in Class</th>
-                          <th>Teacher Comments</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {students
-                          .filter((s) => s.classId === selectedClass)
-                          .map((s) => {
-                            const r = records[s.id] || {
-                              attendance: 'PRESENT',
-                              performance: 'GOOD',
-                              conduct: 'GOOD',
-                              punctuality: 'ALWAYS_ON_TIME',
-                              homework: 'ALWAYS_COMPLETED',
-                              participation: 'ACTIVE',
-                              comment: '',
-                            };
-                            const isAbsent = r.attendance === 'ABSENT';
-                            return (
-                              <tr key={s.id} style={{ background: isAbsent ? '#fef2f2' : undefined }}>
-                                <td>
-                                  <strong>{s.fullName}</strong>
-                                  <div style={{ fontSize: 11, color: '#748792' }}>{s.studentId}</div>
-                                </td>
-                                <td>
-                                  <select
-                                    value={r.attendance}
-                                    onChange={(e) =>
-                                      setRecords({
-                                        ...records,
-                                        [s.id]: { ...r, attendance: e.target.value },
-                                      })
-                                    }
-                                  >
-                                    <option value="PRESENT">Present</option>
-                                    <option value="LATE">Late coming</option>
-                                    <option value="ABSENT">Absent</option>
-                                  </select>
-                                </td>
-                                <td>
-                                  {naCell(
-                                    isAbsent,
-                                    <select
-                                      value={r.performance}
-                                      onChange={(e) =>
-                                        setRecords({
-                                          ...records,
-                                          [s.id]: { ...r, performance: e.target.value },
-                                        })
-                                      }
-                                    >
-                                      <option value="EXCELLENT">Excellent</option>
-                                      <option value="GOOD">Good</option>
-                                      <option value="NEEDS_IMPROVEMENT">Needs Improvement</option>
-                                    </select>
-                                  )}
-                                </td>
-                                <td>
-                                  {naCell(
-                                    isAbsent,
-                                    <select
-                                      value={r.conduct}
-                                      onChange={(e) =>
-                                        setRecords({
-                                          ...records,
-                                          [s.id]: { ...r, conduct: e.target.value },
-                                        })
-                                      }
-                                    >
-                                      <option value="EXCELLENT">Excellent</option>
-                                      <option value="GOOD">Good</option>
-                                      <option value="NEEDS_IMPROVEMENT">Needs Improvement</option>
-                                    </select>
-                                  )}
-                                </td>
-                                <td>
-                                  {naCell(
-                                    isAbsent,
-                                    <select
-                                      value={r.punctuality}
-                                      onChange={(e) =>
-                                        setRecords({
-                                          ...records,
-                                          [s.id]: { ...r, punctuality: e.target.value },
-                                        })
-                                      }
-                                    >
-                                      <option value="ALWAYS_ON_TIME">Always On Time</option>
-                                      <option value="OCCASIONALLY_LATE">Occasionally Late</option>
-                                      <option value="FREQUENTLY_LATE">Frequently Late</option>
-                                    </select>
-                                  )}
-                                </td>
-                                <td>
-                                  {naCell(
-                                    isAbsent,
-                                    <select
-                                      value={r.homework}
-                                      onChange={(e) =>
-                                        setRecords({
-                                          ...records,
-                                          [s.id]: { ...r, homework: e.target.value },
-                                        })
-                                      }
-                                    >
-                                      <option value="ALWAYS_COMPLETED">Always Completed</option>
-                                      <option value="USUALLY_COMPLETED">Usually Completed</option>
-                                      <option value="RARELY_COMPLETED">Rarely Completed</option>
-                                    </select>
-                                  )}
-                                </td>
-                                <td>
-                                  {naCell(
-                                    isAbsent,
-                                    <select
-                                      value={r.participation}
-                                      onChange={(e) =>
-                                        setRecords({
-                                          ...records,
-                                          [s.id]: { ...r, participation: e.target.value },
-                                        })
-                                      }
-                                    >
-                                      <option value="ACTIVE">Active</option>
-                                      <option value="MODERATE">Moderate</option>
-                                      <option value="PASSIVE">Passive</option>
-                                    </select>
-                                  )}
-                                </td>
-                                <td>
-                                  {naCell(
-                                    isAbsent,
-                                    <input
-                                      type="text"
-                                      placeholder={
-                                        r.performance === 'NEEDS_IMPROVEMENT' || r.conduct === 'NEEDS_IMPROVEMENT'
-                                          ? 'Mandatory comment for needs improvement...'
-                                          : 'Optional note...'
-                                      }
-                                      value={r.comment}
-                                      onChange={(e) =>
-                                        setRecords({
-                                          ...records,
-                                          [s.id]: { ...r, comment: e.target.value },
-                                        })
-                                      }
-                                      style={{
-                                        borderColor:
-                                          (r.performance === 'NEEDS_IMPROVEMENT' || r.conduct === 'NEEDS_IMPROVEMENT') && !r.comment.trim()
-                                            ? '#c67a53'
-                                            : undefined,
-                                      }}
-                                    />
-                                  )}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 20 }}>
-                    <button
-                      className="btn outline"
-                      onClick={() => initiateSubmitLesson(false)}
-                      disabled={busy}
-                    >
-                      Save Draft
-                    </button>
-                    <button
-                      className="btn primary"
-                      onClick={() => initiateSubmitLesson(true)}
-                      disabled={busy}
-                    >
-                      Submit for Administrative Review <ChevronRight size={16} />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
+          {/* ================= PAGE: MONTHLY RECORD ENTRY (§193) ================= */}
+          {page === 'monthlyRecord' && user.role !== 'SUPER_ADMIN' && ref && (
+            <MonthlyEntryView
+              api={api}
+              post={post}
+              userRole={user.role}
+              refData={ref}
+              today={ref.today}
+              setModalConfig={setModalConfig}
+              targetEntryId={monthlyEntryTarget}
+              onTargetConsumed={() => setMonthlyEntryTarget(null)}
+              prefill={monthlyEntryPrefill}
+              onPrefillConsumed={() => setMonthlyEntryPrefill(null)}
+              onNotice={setNotice}
+            />
           )}
 
           {/* ================= PAGE: REPORTS (HISTORY & APPROVALS) ================= */}
           {page === 'reports' && user.role !== 'SUPER_ADMIN' && (
             <div>
-              {/* Review Drawer / Modal for Admin */}
-              {user.role === 'ADMIN' && reviewDetail && (
+              {/* Review Drawer / Modal (admin review, teacher read-only) */}
+              {reviewDetail && (
                 <div className="panel review-panel" style={{ marginBottom: 24, border: '2px solid #0f766e' }}>
                   <div className="list-toolbar">
                     <div>
-                      <div className="eyebrow">ADMINISTRATIVE REVIEW QUEUE</div>
+                      <div className="eyebrow">{user.role === 'ADMIN' ? 'ADMINISTRATIVE REVIEW QUEUE' : 'LEGACY DATED REPORT (READ-ONLY)'}</div>
                       <h2>
-                        Review Report: Class {reviewDetail.lesson.classNameSnapshot} · {reviewDetail.lesson.subjectNameSnapshot}
+                        {user.role === 'ADMIN' ? 'Review Report' : 'Report Details'}: Class {reviewDetail.lesson.classNameSnapshot} · {reviewDetail.lesson.subjectNameSnapshot}
                       </h2>
                       <p>
                         Lesson Date: {reviewDetail.lesson.lessonDate} · Teacher: {reviewDetail.lesson.teacherNameSnapshot} · Current Status: <Badge status={reviewDetail.lesson.status} />
@@ -1912,8 +1588,8 @@ export default function Home() {
                           return (
                           <tr key={r.id} style={absent ? { background: '#fef2f2' } : undefined}>
                             <td>
-                              <strong>{r.studentNameSnapshot}</strong>
-                              <div style={{ fontSize: 11, color: '#748792' }}>{r.studentCodeSnapshot}</div>
+                              <strong>{r.studentName}</strong>
+                              <div style={{ fontSize: 11, color: '#748792' }}>{r.studentCode}</div>
                             </td>
                             <td><Badge status={r.attendanceStatus} /></td>
                             <td>{cell(r.performance)}</td>
@@ -1930,12 +1606,25 @@ export default function Home() {
                   </div>
 
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <button
-                      className="btn outline"
-                      onClick={() => initiateDateCorrection(reviewDetail.lesson.id, reviewDetail.lesson.lessonDate)}
-                    >
-                      <Clock3 size={14} /> Correct Date
-                    </button>
+                    {user.role === 'ADMIN' ? (
+                      <button
+                        className="btn outline"
+                        onClick={() => initiateDateCorrection(reviewDetail.lesson.id, reviewDetail.lesson.lessonDate)}
+                      >
+                        <Clock3 size={14} /> Correct Date
+                      </button>
+                    ) : (
+                      ['DRAFT', 'RETURNED'].includes(reviewDetail.lesson.status) && (
+                        <button
+                          className="btn outline"
+                          style={{ color: '#c67a53', borderColor: '#c67a53' }}
+                          onClick={() => initiateDeleteDraft(reviewDetail.lesson.id, 'lesson')}
+                        >
+                          <Trash2 size={14} /> Delete Draft
+                        </button>
+                      )
+                    )}
+                    {user.role === 'ADMIN' && (
                     <div style={{ display: 'flex', gap: 10 }}>
                       {reviewDetail.lesson.status === 'SUBMITTED' && (
                         <button
@@ -1971,6 +1660,105 @@ export default function Home() {
                         </button>
                       )}
                     </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Monthly Record Review Drawer (§193) */}
+              {user.role === 'ADMIN' && monthlyReviewDetail && (
+                <div className="panel review-panel" style={{ marginBottom: 24, border: '2px solid #0f766e' }}>
+                  <div className="list-toolbar">
+                    <div>
+                      <div className="eyebrow">ADMINISTRATIVE REVIEW QUEUE · MONTHLY RECORD</div>
+                      <h2>
+                        Review Monthly Record: Class {monthlyReviewDetail.className} · {monthlyReviewDetail.subjectName}
+                      </h2>
+                      <p>
+                        Month: {monthTag(monthlyReviewDetail.month)} · Teacher: {monthlyReviewDetail.teacherName || '—'} · Current Status: <Badge status={monthlyReviewDetail.entry.status} />
+                      </p>
+                      <p style={{ fontSize: 13, color: '#748792' }}>
+                        Sessions held: {monthlyReviewDetail.entry.sessionsHeld}
+                        {monthlyReviewDetail.entry.topics ? <> · Topics: {monthlyReviewDetail.entry.topics}</> : null}
+                      </p>
+                      {monthlyReviewDetail.entry.reviewComment && (
+                        <div style={{ marginTop: 8, padding: 8, background: '#fef2f2', color: '#991b1b', borderRadius: 4 }}>
+                          <strong>Previous Review Note:</strong> {monthlyReviewDetail.entry.reviewComment}
+                        </div>
+                      )}
+                    </div>
+                    <button className="icon-link" onClick={() => setMonthlyReviewDetail(null)}>
+                      <X size={20} />
+                    </button>
+                  </div>
+
+                  <div className="table-scroll" style={{ maxHeight: 350, margin: '16px 0' }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Student</th>
+                          <th>Punctuality</th>
+                          <th>Performance</th>
+                          <th>Conduct</th>
+                          <th>Participation</th>
+                          <th>Homework</th>
+                          <th>Teacher Comments</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(() => {
+                          const names = new Map<string, { studentName: string; studentCode: string }>(
+                            (monthlyReviewDetail.roster || []).map((s: any) => [s.studentId, { studentName: s.studentName, studentCode: s.studentCode }]),
+                          );
+                          return (monthlyReviewDetail.records || []).map((r: any) => {
+                            const info = names.get(r.studentId);
+                            return (
+                              <tr key={r.studentId}>
+                                <td>
+                                  <strong>{info?.studentName || r.studentId}</strong>
+                                  <div style={{ fontSize: 11, color: '#748792' }}>{info?.studentCode || ''}</div>
+                                </td>
+                                <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+                                  <strong style={{ color: '#0f766e' }}>{r.punctuality ? pretty(r.punctuality) : '—'}</strong>
+                                </td>
+                                <td>{r.performance ? pretty(r.performance) : '—'}</td>
+                                <td>{r.conduct ? pretty(r.conduct) : '—'}</td>
+                                <td>{r.participation ? pretty(r.participation) : '—'}</td>
+                                <td>{r.homework ? pretty(r.homework) : '—'}</td>
+                                <td style={{ fontSize: 12 }}>{r.comment || '—'}</td>
+                              </tr>
+                            );
+                          });
+                        })()}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                    {monthlyReviewDetail.entry.status === 'SUBMITTED' && (
+                      <button className="btn outline" onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'UNDER_REVIEW')}>
+                        Mark Under Review
+                      </button>
+                    )}
+                    {['SUBMITTED', 'UNDER_REVIEW'].includes(monthlyReviewDetail.entry.status) && (
+                      <>
+                        <button
+                          className="btn outline"
+                          style={{ color: '#c67a53', borderColor: '#c67a53' }}
+                          onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'RETURNED')}
+                        >
+                          Return for Revision
+                        </button>
+                        <button className="btn primary" onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'APPROVED')}>
+                          <CheckCircle2 size={16} /> Approve Record
+                        </button>
+                      </>
+                    )}
+                    {monthlyReviewDetail.entry.status === 'APPROVED' && (
+                      <button className="btn outline" onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'SUBMITTED')}>
+                        Reopen Approved Record
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -1979,7 +1767,7 @@ export default function Home() {
               <div className="panel">
                 <div className="list-toolbar">
                   <div>
-                    <h2>{user.role === 'ADMIN' ? 'All Daily Lesson Reports' : 'My Lesson Reports History'}</h2>
+                    <h2>{user.role === 'ADMIN' ? 'All Reports' : 'My Report History'}</h2>
                     <p>Filter by cohort, subject area, approval status, and any date range</p>
                   </div>
                   <button className="btn outline" onClick={() => refresh()}>
@@ -2030,7 +1818,7 @@ export default function Home() {
                 </div>
 
                 {reports.length === 0 ? (
-                  <Empty title="No reports found" detail="No daily reports match the current filter criteria." />
+                  <Empty title="No reports found" detail="No reports match the current filter criteria." />
                 ) : (
                   <div className="table-scroll">
                     <table>
@@ -2049,7 +1837,7 @@ export default function Home() {
                       <tbody>
                         {reports.map((r) => (
                           <tr key={r.id}>
-                            <td style={{ whiteSpace: 'nowrap' }}>{r.lessonDate}</td>
+                            <td style={{ whiteSpace: 'nowrap' }}>{r.month ? monthTag(r.month) : r.lessonDate}</td>
                             <td><strong>{r.className}</strong></td>
                             <td>{r.subjectName}</td>
                             {user.role === 'ADMIN' && <td>{r.teacherName}</td>}
@@ -2070,15 +1858,15 @@ export default function Home() {
                                 <button
                                   className="btn outline"
                                   style={{ padding: '4px 8px', fontSize: 12 }}
-                                  onClick={() => openLesson(r.id)}
+                                  onClick={() => openReport(r)}
                                 >
                                   {user.role === 'ADMIN' ? 'Review' : 'Open'}
                                 </button>
-                                {r.status === 'DRAFT' && user.role === 'TEACHER' && (
+                                {((r.status === 'DRAFT' && user.role === 'TEACHER') || (r.kind === 'monthly' && r.status === 'RETURNED' && user.role === 'TEACHER')) && (
                                   <button
                                     className="btn outline"
                                     style={{ padding: '4px 8px', fontSize: 12, color: '#c67a53' }}
-                                    onClick={() => initiateDeleteDraft(r.id)}
+                                    onClick={() => initiateDeleteDraft(r.id, r.kind === 'monthly' ? 'monthly' : 'lesson')}
                                   >
                                     <Trash2 size={13} />
                                   </button>
@@ -2311,19 +2099,38 @@ export default function Home() {
                     {/* EXPORT BUTTONS (§57, §105) */}
                     <div style={{ display: 'flex', gap: 8 }}>
                       <button
-              className="btn outline"
-              onClick={() =>
-                run(async () => {
-                  await downloadClassSummaryPdf({
-                    school: monthly.organization, period: monthly.period, closedMonths: monthly.closedMonths,
-                    summaries: monthly.summaries, comparison: monthly.comparison, rules: monthly.rules,
-                    logoUrl: ref?.organization?.logoUrl || '/icons/school_logo.png',
-                  });
-                  setNotice('Class summary PDF downloaded.');
-                })
-              }
-            >
-                        <Printer size={15} /> Print / PDF
+                        className="btn primary"
+                        disabled={busy}
+                        onClick={() =>
+                          run(async () => {
+                            const students = new Set(monthly.summaries.map((s) => s.studentId)).size;
+                            setNotice(`Building one PDF report for each of ${students} students…`);
+                            const result = await downloadClassReportsZip({
+                              school: monthly.organization, period: monthly.period, closedMonths: monthly.closedMonths,
+                              summaries: monthly.summaries, comparison: monthly.comparison, data: monthly.raw, rules: monthly.rules,
+                              logoUrl: ref?.organization?.logoUrl || '/icons/school_logo.png',
+                              onProgress: (done, total) => setNotice(`Building student PDFs… ${done} of ${total}`),
+                            });
+                            setNotice(`Class reports ZIP downloaded: ${result.filename} (${result.count} student PDFs).`);
+                          })
+                        }
+                      >
+                        <Download size={15} /> Class Reports ZIP
+                      </button>
+                      <button
+                        className="btn outline"
+                        onClick={() =>
+                          run(async () => {
+                            await downloadClassSummaryPdf({
+                              school: monthly.organization, period: monthly.period, closedMonths: monthly.closedMonths,
+                              summaries: monthly.summaries, comparison: monthly.comparison, rules: monthly.rules,
+                              logoUrl: ref?.organization?.logoUrl || '/icons/school_logo.png',
+                            });
+                            setNotice('Class summary PDF downloaded.');
+                          })
+                        }
+                      >
+                        <Printer size={15} /> Class Summary PDF
                       </button>
                       <button className="btn outline" onClick={exportMonthlyCsv}>
                         <Download size={15} /> Export CSV
@@ -2349,9 +2156,8 @@ export default function Home() {
                             Subject <ArrowUpDown size={12} />
                           </th>
                           <th>Lessons</th>
-                          <th>P / L / A</th>
-                          <th style={{ cursor: 'pointer' }} onClick={() => toggleMonthlySort('attendanceRate')}>
-                            Att. % <ArrowUpDown size={12} />
+                          <th style={{ cursor: 'pointer' }} onClick={() => toggleMonthlySort('punctualityResult')}>
+                            Punctuality <ArrowUpDown size={12} />
                           </th>
                           <th style={{ cursor: 'pointer' }} onClick={() => toggleMonthlySort('performanceResult')}>
                             Performance <ArrowUpDown size={12} />
@@ -2362,7 +2168,7 @@ export default function Home() {
                         </tr>
                       </thead>
                       <tbody>
-                        {sortedSummaries.map((s) => (
+                        {visibleSummaries.map((s) => (
                           <tr key={`${s.studentId}-${s.subjectName}`}>
                             <td>
                               <strong>{s.studentName}</strong>
@@ -2372,14 +2178,7 @@ export default function Home() {
                             <td>{s.subjectName}</td>
                             <td>{s.lessons}</td>
                             <td>
-                              <span style={{ color: '#22a57d', fontWeight: 600 }}>{s.attendance.PRESENT || 0}</span> /{' '}
-                              <span style={{ color: '#d79c41', fontWeight: 600 }}>{s.attendance.LATE || 0}</span> /{' '}
-                              <span style={{ color: '#c67a53', fontWeight: 600 }}>{s.attendance.ABSENT || 0}</span>
-                            </td>
-                            <td>
-                              <span style={{ fontWeight: 600, color: (s.attendanceRate ?? 0) >= 80 ? '#22a57d' : '#c67a53' }}>
-                                {s.attendanceRate !== null ? `${s.attendanceRate}%` : '—'}
-                              </span>
+                              <span style={{ fontWeight: 600 }}>{pretty(s.punctualityResult)}</span>
                             </td>
                             <td>
                               <span
@@ -2422,6 +2221,8 @@ export default function Home() {
                       closedMonths={monthly.closedMonths}
                       school={monthly.organization}
                       logoUrl={ref?.organization?.logoUrl || '/icons/school_logo.png'}
+                      search={monthlySearch}
+                      onSearch={setMonthlySearch}
                       summaries={monthly.summaries}
                       comparison={monthly.comparison}
                       data={monthly.raw}
@@ -2462,7 +2263,11 @@ export default function Home() {
             <DataQualityView
               api={api}
               today={ref?.today || overview?.today || ''}
-              onOpenReport={openLesson}
+              onOpenReport={(id, kind) => {
+                setPage('reports');
+                if (kind === 'monthly') openReport({ id, kind: 'monthly' });
+                else openLesson(id);
+              }}
             />
           )}
 
@@ -2475,6 +2280,23 @@ export default function Home() {
               onOpenNewModal={() => {
                 if (students[0]) openBehaviourModal(students[0]);
               }}
+            />
+          )}
+
+          {/* ================= PAGE: CLUBS & ACTIVITIES ================= */}
+          {page === 'clubs' && user.role !== 'SUPER_ADMIN' && ref && (
+            <ClubsView
+              api={api}
+              post={post}
+              userRole={user.role}
+              students={ref.students}
+              classes={ref.classes}
+              years={ref.years}
+              teachers={ref.teachers}
+              today={ref.today}
+              setModalConfig={setModalConfig}
+              school={ref.organization?.name || overview?.organization || 'School'}
+              logoUrl={ref.organization?.logoUrl || '/icons/school_logo.png'}
             />
           )}
 
@@ -2556,7 +2378,7 @@ export default function Home() {
                       </tr>
                     </thead>
                     <tbody>
-                      {((ref as any)[`${entity}s`] || []).map((item: any) => {
+                      {(((ref as any)[entity === 'class' ? 'classes' : `${entity}s`]) || []).map((item: any) => {
                         const a = entity === 'assignment' ? assignmentDisplay(item) : null;
                         return (
                         <tr key={item.id}>
@@ -2564,6 +2386,7 @@ export default function Home() {
                             <strong>{a ? a.teacher : item.name || item.fullName || item.email}</strong>
                             {a && <div style={{ fontSize: 11, color: '#748792' }}>{a.subject}</div>}
                             {!a && item.teacherId && <div style={{ fontSize: 11, color: '#748792' }}>ID: {item.teacherId}</div>}
+                            {!a && item.username && <div style={{ fontSize: 11, color: '#748792' }}>Username: {item.username}</div>}
                             {item.code && <div style={{ fontSize: 11, color: '#748792' }}>Code: {item.code}</div>}
                           </td>
                           <td>
@@ -2571,7 +2394,6 @@ export default function Home() {
                               <span>{item.startDate} to {item.endDate}</span>
                             )}
                             {item.orderIndex !== undefined && <span>Order: {item.orderIndex}</span>}
-                            {item.department && <span>Dept: {item.department}</span>}
                             {a && <span>Class: {a.cls} · Year: {a.year}</span>}
                             {!a && item.gradeId && (
                               <span>Grade: {ref?.grades?.find((g) => g.id === item.gradeId)?.name || '—'}</span>
@@ -2978,6 +2800,32 @@ export default function Home() {
                                 Open Organization
                               </button>
                               <button className="btn outline" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => {
+                                const admin = org.admin;
+                                if (!admin) {
+                                  setNotice(`No administrator is on record for ${org.name}.`);
+                                  return;
+                                }
+                                setModalConfig({
+                                  type: 'edit_entity',
+                                  title: `Edit Administrator · ${org.name}`,
+                                  fields: [
+                                    { key: 'name', label: 'Full name', value: admin.name },
+                                    { key: 'username', label: 'Username', value: admin.username },
+                                    { key: 'email', label: 'Email', type: 'email', value: admin.email },
+                                  ],
+                                  onConfirm: (values) => {
+                                    run(async () => {
+                                      await post('updateAdmin', { organizationId: org.id, userId: admin.id, name: values.name, username: values.username, email: values.email });
+                                      setNotice(`Administrator for ${org.name} updated.`);
+                                      const res = await api('organizations');
+                                      setOrganizations(res.organizations);
+                                    });
+                                  },
+                                });
+                              }}>
+                                Edit Admin
+                              </button>
+                              <button className="btn outline" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => {
                                 setModalConfig({
                                   type: 'reset_password',
                                   title: 'Reset School Admin Password',
@@ -3133,6 +2981,40 @@ export default function Home() {
                 </div>
               </div>
 
+              {/* My Account */}
+              <div className="panel form-panel">
+                <h3>My Account</h3>
+                <p style={{ fontSize: 13, color: '#748792' }}>
+                  Your sign-in username. It must not be taken by any other account.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+                  <label>
+                    Username
+                    <input
+                      type="text"
+                      value={accountUsername ?? user.username ?? ''}
+                      onChange={(e) => setAccountUsername(e.target.value)}
+                    />
+                  </label>
+                  <button
+                    className="btn primary"
+                    disabled={!accountUsername || accountUsername.trim() === (user.username || '')}
+                    onClick={() => {
+                      if (!accountUsername) return;
+                      const wanted = accountUsername.trim();
+                      run(async () => {
+                        const res = await post('updateMyAccount', { username: wanted });
+                        setAccountUsername(res.username);
+                        setUser({ ...(user as User), username: res.username });
+                        setNotice('Username updated.');
+                      });
+                    }}
+                  >
+                    Save Username
+                  </button>
+                </div>
+              </div>
+
               {/* Month Closures Manager */}
               <div className="panel form-panel">
                 <h3>Reporting Period Closures (§165)</h3>
@@ -3143,7 +3025,7 @@ export default function Home() {
                   <input
                     type="month"
                     id="newClosureMonth"
-                    defaultValue={overview?.today?.slice(0, 7) || '2026-09'}
+                    defaultValue={overview?.today?.slice(0, 7) || ''}
                     style={{ width: 160 }}
                   />
                   <button

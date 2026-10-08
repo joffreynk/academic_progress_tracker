@@ -22,6 +22,41 @@
       "when": 1790750061709,
       "tag": "0002_backfill_observation_enums",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1790929129729,
+      "tag": "0003_short_mister_sinister",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790947131944,
+      "tag": "0004_dark_silver_fox",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791355284020,
+      "tag": "0005_club_activity_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1791378831791,
+      "tag": "0006_merge_daily_to_monthly",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1791383638140,
+      "tag": "0007_subject_students",
+      "breakpoints": true
     }
   ]
 }

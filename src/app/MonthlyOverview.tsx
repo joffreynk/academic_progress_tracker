@@ -4,7 +4,7 @@ import { ArrowDown, ArrowRight, ArrowUp, Download, Printer } from 'lucide-react'
 import type ExcelJS from 'exceljs';
 import { resultTrend, summarize, summarizeByMonth, type Observation, type Rules, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
 import { monthLabelShort, periodLabel, periodSlug, type Period } from '@/lib/period';
-import { downloadStudentPdf } from '@/lib/reportPdf';
+import { downloadStudentPdf, downloadClassReportsZip } from '@/lib/reportPdf';
 
 type Summary={studentId:string;studentName:string;studentCode:string;className:string;subjectName:string;teacherName?:string;lessons:number;attendance:Record<string,number>;performance:Record<string,number>;participation:Record<string,number>;homework:Record<string,number>;conduct:Record<string,number>;punctuality:Record<string,number>;attendanceRate:number|null;performanceResult:string;participationResult:string;homeworkResult:string;conductResult:string;punctualityResult:string;topics:string[];observations:{date:string;comment:string;subject:string}[];version:number};
 const pretty=(s:string)=>s.replaceAll('_',' ').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase());
@@ -14,8 +14,6 @@ const PILL_KEYS=['EXCELLENT','GOOD','NEEDS_IMPROVEMENT'];
 type Metric={key:string;label:string;render:(m:SubjectMonthSummary)=>string;numeric:(m:SubjectMonthSummary)=>number|null;higherIsBetter:boolean};
 const METRICS:Metric[]=[
   {key:'lessons',label:'Lessons recorded',render:m=>String(m.lessons),numeric:m=>m.lessons,higherIsBetter:true},
-  {key:'attendance',label:'Present / Late / Absent',render:m=>`${m.attendance.PRESENT||0} / ${m.attendance.LATE||0} / ${m.attendance.ABSENT||0}`,numeric:m=>m.attendanceRate,higherIsBetter:true},
-  {key:'attendanceRate',label:'Attendance %',render:m=>m.attendanceRate===null?'—':`${m.attendanceRate}%`,numeric:m=>m.attendanceRate,higherIsBetter:true},
   {key:'performance',label:'Performance',render:m=>m.performanceResult==='No data'?'—':pretty(m.performanceResult),numeric:()=>null,higherIsBetter:true},
   {key:'participation',label:'Participation',render:m=>m.participationResult==='No data'?'—':pretty(m.participationResult),numeric:()=>null,higherIsBetter:true},
   {key:'homework',label:'Homework',render:m=>m.homeworkResult,numeric:()=>null,higherIsBetter:true},
@@ -94,9 +92,9 @@ function ComparisonTable({ title, months, rows, closedMonths }: { title: string;
   );
 }
 
-export default function MonthlyOverview({ period, closedMonths = [], school, logoUrl = null, summaries, comparison = [], data = [], rules }:{period:Period;closedMonths?:string[];school:string;logoUrl?:string|null;summaries:Summary[];comparison?:SubjectComparison[];data?:Observation[];rules:Rules}){
-  const [student,setStudent]=useState('');const [search,setSearch]=useState('');
-const [msg,setMsg]=useState<string|null>(null);
+export default function MonthlyOverview({ period, closedMonths = [], school, logoUrl = null, summaries, comparison = [], data = [], rules, search = '', onSearch }:{period:Period;closedMonths?:string[];school:string;logoUrl?:string|null;summaries:Summary[];comparison?:SubjectComparison[];data?:Observation[];rules:Rules;search?:string;onSearch?:(v:string)=>void}){
+  const [student,setStudent]=useState('');
+const [msg,setMsg]=useState<string|null>(null);const [zipping,setZipping]=useState(false);
 useEffect(()=>{if(!msg)return;const t=setTimeout(()=>setMsg(null),7000);return()=>clearTimeout(t);},[msg]);
   const label=periodLabel(period);
   const names=useMemo(()=>[...new Map(summaries.map(s=>[s.studentId,{id:s.studentId,name:s.studentName,code:s.studentCode,className:s.className}])).values()], [summaries]);
@@ -115,8 +113,8 @@ const exportStudentMonthly = async () => {
    if (!selected) return;
    const Excel = (await import('exceljs')).default;
    const book = new Excel.Workbook();
-   const sheet = book.addWorksheet('Student Follow-Up');
-   sheet.addRow(['STUDENT ACADEMIC AND BEHAVIOURAL FOLLOW-UP']);
+    const sheet = book.addWorksheet('Student Follow-Up');
+    sheet.addRow(['MONTHLY STUDENT ACADEMIC PROGRESS REPORT']);
    sheet.addRow([school]);
    sheet.addRow(['Student Name', selected.name, 'Student ID', selected.code]);
    sheet.addRow(['Class', selected.className, 'Reporting Period', label]);
@@ -135,13 +133,10 @@ const exportStudentMonthly = async () => {
    sheet.addRow(['Homework & Assignments', overall.homeworkResult]);
    sheet.addRow(['Participation in Class', pretty(overall.participationResult)]);
    sheet.addRow([]);
-   sheet.addRow(['3. ATTENDANCE']);
-   sheet.addRow(['Present', overall.attendance.PRESENT || 0, 'Late coming', overall.attendance.LATE || 0, 'Absent', overall.attendance.ABSENT || 0, 'Attendance %', `${overall.attendanceRate ?? 0}%`]);
-   sheet.addRow([]);
-   sheet.addRow(['4. TEACHER / SCHOOL COMMENTS']);
+   sheet.addRow(['3. TEACHER / SCHOOL COMMENTS']);
    overall.observations.forEach(o => sheet.addRow([o.date, o.subject, o.comment]));
    sheet.addRow([]);
-   sheet.addRow(['5. REPORT INFORMATION']);
+   sheet.addRow(['4. REPORT INFORMATION']);
    sheet.addRow(['Generated Date', new Date().toLocaleDateString('en-GB'), 'Calculation Version', String(overall.version)]);
    if (months.length > 1) addComparisonSheets(book, comparable, subjectMonths, overallMonths);
 
@@ -171,7 +166,7 @@ const exportStudentMonthly = async () => {
     const Excel = (await import('exceljs')).default;
     const book = new Excel.Workbook();
     const sheet = book.addWorksheet('Subject Follow-Up');
-    sheet.addRow(['STUDENT ACADEMIC AND BEHAVIOURAL FOLLOW-UP']);
+    sheet.addRow(['MONTHLY STUDENT ACADEMIC PROGRESS REPORT']);
     sheet.addRow([school]);
     sheet.addRow(['Student Name', selected.name, 'Student ID', selected.code]);
     sheet.addRow(['Class', selected.className, 'Reporting Period', label]);
@@ -188,13 +183,7 @@ const exportStudentMonthly = async () => {
     sheet.addRow(['Homework & Assignments', subjectSummary.homeworkResult]);
     sheet.addRow(['Participation in Class', pretty(subjectSummary.participationResult)]);
     sheet.addRow([]);
-    sheet.addRow(['3. ATTENDANCE']);
-    sheet.addRow(['Present', subjectSummary.attendance.PRESENT || 0, 'Late coming', subjectSummary.attendance.LATE || 0, 'Absent', subjectSummary.attendance.ABSENT || 0]);
-    const attRate = subjectSummary.attendanceRate;
-    const attTotal = (subjectSummary.attendance.PRESENT||0)+(subjectSummary.attendance.LATE||0)+(subjectSummary.attendance.ABSENT||0);
-    sheet.addRow(['Attendance %', `${attRate??0}%`, 'Based on', attTotal, 'observations']);
-    sheet.addRow([]);
-    sheet.addRow(['4. REPORT INFORMATION']);
+    sheet.addRow(['3. REPORT INFORMATION']);
     sheet.addRow(['Generated Date', new Date().toLocaleDateString('en-GB'), 'Calculation Version', String(subjectSummary.version)]);
     if (months.length > 1) {
       const rows = comparable.find((c) => c.subjectName === subjectName)?.months ?? [];
@@ -227,17 +216,34 @@ const exportStudentMonthly = async () => {
     setMsg('Student follow-up PDF downloaded.');
   };
 
+  // §193: one PDF per student for the whole cohort, delivered as a single ZIP archive.
+  const printClassZip = async () => {
+    if (zipping || !names.length) return;
+    setZipping(true);
+    setMsg(`Building PDF reports for ${names.length} students…`);
+    try {
+      const result = await downloadClassReportsZip({
+        school, period, closedMonths, summaries, comparison, data, rules, logoUrl,
+        onProgress: (done, total) => setMsg(`Building PDF reports… ${done} of ${total}`),
+      });
+      setMsg(`Class reports ZIP downloaded: ${result.filename} (${result.count} student PDFs).`);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'ZIP export failed.');
+    } finally {
+      setZipping(false);
+    }
+  };
+
 
  return <section className="panel monthly-extra" aria-label="Reporting period details">
    {msg&&<div className="notice-banner" style={{background:'#f0fdf4',color:'#166534',marginBottom:16,borderColor:'#d3f2e0'}}>{msg}</div>}
-   <div className="list-toolbar"><div><h2>Report perspectives</h2><p>{school} · {label} · {all.lessons} recorded lesson reports · {names.length} students covered · {data.length} student observations</p></div></div>
-   <div className="monthly-overview-grid"><div className="metric"><span>Attendance</span><strong>{all.attendanceRate===null?'No data':`${all.attendanceRate}%`}</strong><small>{countText(all.attendance)} · {data.length} observations</small></div><div className="metric"><span>Performance distribution</span><strong>{Object.values(all.performance).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.performance)}</small></div><div className="metric"><span>Participation</span><strong>{Object.values(all.participation).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.participation)}</small></div><div className="metric"><span>Homework</span><strong>{Object.values(all.homework).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.homework)}</small></div></div>
-   <div className="monthly-extra-controls"><label>Search student, ID, class or subject<input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search report rows" /></label><label>Full student period report<select value={student} onChange={e=>setStudent(e.target.value)}><option value="">Choose a student</option>{names.map(n=><option key={n.id} value={n.id}>{n.name} · {n.code}</option>)}</select></label></div>
+   <div className="list-toolbar"><div><h2>Report perspectives</h2><p>{school} · {label} · {all.lessons} recorded lesson reports · {names.length} students covered · {data.length} student observations</p></div><button className="btn outline" onClick={printClassZip} disabled={zipping||!names.length}><Download size={15}/>{zipping?' Building ZIP…':' Class Reports ZIP'}</button></div>
+   <div className="monthly-overview-grid"><div className="metric"><span>Punctuality</span><strong>{all.punctualityResult==='No data'?'No data':all.punctualityResult}</strong><small>{countText(all.punctuality)} · {data.length} observations</small></div><div className="metric"><span>Performance distribution</span><strong>{Object.values(all.performance).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.performance)}</small></div><div className="metric"><span>Participation</span><strong>{Object.values(all.participation).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.participation)}</small></div><div className="metric"><span>Homework</span><strong>{Object.values(all.homework).reduce((a,b)=>a+b,0)} observations</strong><small>{countText(all.homework)}</small></div></div>
+   <div className="monthly-extra-controls"><label>Search student, ID, class or subject<input value={search} onChange={e=>onSearch?.(e.target.value)} placeholder="Search report rows" /></label><label>Full student period report<select value={student} onChange={e=>setStudent(e.target.value)}><option value="">Choose a student</option>{names.map(n=><option key={n.id} value={n.id}>{n.name} · {n.code}</option>)}</select></label></div>
    <p className="monthly-count">{visible.length} of {summaries.length} subject summaries match your search.</p>
-   {selected&&<article className="full-student-report"><div className="student-report-top"><div className="eyebrow">STUDENT ACADEMIC AND BEHAVIOURAL FOLLOW-UP</div><div className="student-report-actions"><button className="btn outline" onClick={printStudentPdf}><Printer size={15}/> Print / Save as PDF</button><button className="btn outline" onClick={exportStudentMonthly}><Download size={15}/> Download Full Excel</button>{subjects.map(s=><button key={s.subjectName} className="btn outline" onClick={()=>exportSubjectMonthly(s.subjectName)}><Download size={15}/> {s.subjectName} Excel</button>)}</div></div><h2>{school}</h2><p><strong>{selected.name}</strong> · {selected.code} · Class {selected.className} · {label} · Calculation version {overall.version}</p><p><strong>Period:</strong> {period.from} to {period.to} ({months.length} month{months.length===1?'':'s'}{closedMonths.length>0?`, ${closedMonths.length} closed`:''})</p><p><strong>Teacher(s):</strong> {[...new Set(subjects.map(s=>s.teacherName).filter(Boolean))].join(', ') || 'Assigned faculty'}</p><p><strong>Source coverage:</strong> {overall.lessons} recorded lessons across {subjects.length} subject{subjects.length===1?'':'s'}. Results describe recorded data only.</p>
+   {selected&&<article className="full-student-report"><div className="student-report-top"><div className="eyebrow">MONTHLY STUDENT ACADEMIC PROGRESS REPORT</div><div className="student-report-actions"><button className="btn outline" onClick={printStudentPdf}><Printer size={15}/> Print / Save as PDF</button><button className="btn outline" onClick={exportStudentMonthly}><Download size={15}/> Download Full Excel</button>{subjects.map(s=><button key={s.subjectName} className="btn outline" onClick={()=>exportSubjectMonthly(s.subjectName)}><Download size={15}/> {s.subjectName} Excel</button>)}</div></div><div className="student-report-brand">{logoUrl?<img className="student-report-logo" src={logoUrl} alt="School logo" onError={(e)=>{(e.currentTarget as HTMLImageElement).style.display='none';}}/>:null}<h2>{school}</h2></div><p><strong>{selected.name}</strong> · Class {selected.className} · {label} · Calculation version {overall.version}</p><p><strong>Period:</strong> {period.from} to {period.to} ({months.length} month{months.length===1?'':'s'}{closedMonths.length>0?`, ${closedMonths.length} closed`:''})</p><p><strong>Teacher(s):</strong> {[...new Set(subjects.map(s=>s.teacherName).filter(Boolean))].join(', ') || 'Assigned faculty'}</p><p><strong>Source coverage:</strong> {overall.lessons} recorded lessons across {subjects.length} subject{subjects.length===1?'':'s'}. Results describe recorded data only.</p>
    <h3>1. Academic performance</h3><div className="table-scroll"><table><thead><tr><th>SUBJECT</th><th>TEACHER</th><th>TOPICS COVERED</th><th>PERFORMANCE LEVEL</th><th>SUPPORTING OBSERVATIONS</th></tr></thead><tbody>{subjects.map(s=><tr key={s.subjectName}><td><strong>{s.subjectName}</strong></td><td>{s.teacherName||'—'}</td><td>{s.topics.join(', ')||'—'}</td><td>{pretty(s.performanceResult)}</td><td>{countText(s.performance)}</td></tr>)}</tbody></table></div>
    <h3>2. Discipline &amp; school conduct</h3><div className="report-facts"><div>Class conduct <strong>{pretty(overall.conductResult)}</strong><small>{countText(overall.conduct)}</small></div><div>Punctuality <strong>{overall.punctualityResult}</strong><small>{countText(overall.punctuality)}</small></div><div>Homework &amp; assignments <strong>{overall.homeworkResult}</strong><small>{countText(overall.homework)}</small></div><div>Participation in class <strong>{pretty(overall.participationResult)}</strong><small>{countText(overall.participation)}</small></div></div>
-   <h3>3. Attendance</h3><p>Present: {overall.attendance.PRESENT||0} · Late coming: {overall.attendance.LATE||0} · Absent: {overall.attendance.ABSENT||0} · Attendance: {overall.attendanceRate??'—'}%</p>
 
    {months.length>1&&<div className="compare-block"><div className="compare-head"><h4>Month-over-month comparison</h4><p>{months.length} reporting months compared for {selected.name} · {subjectMonths.length} month{subjectMonths.length===1?'':'s'} with recorded data</p></div>
    {comparable.length>0
@@ -249,7 +255,7 @@ const exportStudentMonthly = async () => {
      : <p>No recorded observations for this student inside the selected period.</p>}
    </div>}
 
-   <h3>{months.length>1?4:3}. Teacher / school comment</h3>{overall.observations.length?<ul>{overall.observations.map((o,i)=><li key={i}>{o.date} · {o.subject}: {o.comment}</li>)}</ul>:<p>No significant observations recorded for this period.</p>}
-   <h3>{months.length>1?5:4}. Report information</h3><p>Generated {new Date().toLocaleDateString('en-GB')} · Data period: {label} ({period.from} to {period.to}) · Rule version {overall.version} · Based on submitted, under-review and approved lesson records.</p></article>}
+   <h3>3. Teacher / school comment</h3>{overall.observations.length?<ul>{overall.observations.map((o,i)=><li key={i}>{o.date} · {o.subject}: {o.comment}</li>)}</ul>:<p>No significant observations recorded for this period.</p>}
+   <h3>4. Report information</h3><p>Generated {new Date().toLocaleDateString('en-GB')} · Data period: {label} ({period.from} to {period.to}) · Rule version {overall.version} · Based on submitted, under-review and approved lesson records.</p></article>}
  </section>;
 }

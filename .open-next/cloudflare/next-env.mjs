@@ -1,3 +1,0 @@
-export const production = {"DATABASE_URL":"file:./.data/local.db","DB":"DB","APP_URL":"http://localhost:3000","AUTH_SECRET":"dev-secret-key-32-bytes-minimum-length-for-school-platform","SETUP_TOKEN":"WellspringSetup!2026","DEMO_PASSWORD":"DevPassword!2026"};
-export const development = {"DATABASE_URL":"file:./.data/local.db","DB":"DB","APP_URL":"http://localhost:3000","AUTH_SECRET":"dev-secret-key-32-bytes-minimum-length-for-school-platform","SETUP_TOKEN":"WellspringSetup!2026","DEMO_PASSWORD":"DevPassword!2026"};
-export const test = {"DATABASE_URL":"file:./.data/local.db","DB":"DB","APP_URL":"http://localhost:3000","AUTH_SECRET":"dev-secret-key-32-bytes-minimum-length-for-school-platform","SETUP_TOKEN":"WellspringSetup!2026","DEMO_PASSWORD":"DevPassword!2026"};

@@ -110,6 +110,16 @@ export const canonicalSubjectName = (name: string): string => {
   return SUBJECT_ALIASES[subjectKey(trimmed)] || trimmed;
 };
 
+// Sign-in name derived from a spreadsheet name column: lowercase, with punctuation folded
+// into dots so the value still satisfies the username rule (letters, numbers, dot, dash, underscore).
+export const usernameFromName = (name: string): string =>
+  normalizeValue(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '.')
+    .replace(/\.{2,}/g, '.')
+    .replace(/^[.\-_]+|[.\-_]+$/g, '')
+    .slice(0, 60);
+
 export const subjectCodeFor = (name: string, used: Set<string>): string => {
   let base = subjectKey(name) || 'SUBJ';
   if (base.length < 2) base = `${base}SUBJ`.slice(0, 4);
