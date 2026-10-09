@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, Save, Send, Search, Trash2, Users, Wand2, X, AlertTriangle } from 'lucide-react';
 import type { ModalConfig } from '@/components/Modal';
 import { buildNormalRecordDefaults } from '@/lib/reporting';
+import { punctualityLabels, punctualityLevels, performanceLevels, participationLevels, homeworkLevels, conductLevels } from '@/lib/monthly';
+import { monthLabel } from '@/lib/period';
 
 type RosterStudent = { studentId: string; studentCode: string; studentName: string };
 type RosterOption = { id: string; studentCode: string; studentName: string };
@@ -33,28 +35,13 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 // §193 v3: one punctuality select per student — seven categories carry the whole attendance story.
-const PUNCTUALITY_OPTIONS = [
-  ['ALWAYS_ON_TIME', 'Always On Time'],
-  ['USUALLY_ON_TIME', 'Usually On Time'],
-  ['OCCASIONALLY_LATE', 'Occasionally Late'],
-  ['FREQUENTLY_LATE', 'Frequently Late'],
-  ['OCCASIONALLY_ABSENT', 'Occasionally Absent'],
-  ['FREQUENTLY_ABSENT', 'Frequently Absent'],
-  ['ALWAYS_ABSENT', 'Always Absent'],
-] as const;
+const PUNCTUALITY_OPTIONS = punctualityLevels.map((k) => [k, punctualityLabels[k]] as const);
 
-const LEVEL_OPTIONS: Record<'performance' | 'participation' | 'homework' | 'conduct', string[]> = {
-  performance: ['EXCELLENT', 'GOOD', 'NEEDS_IMPROVEMENT'],
-  participation: ['ACTIVE', 'MODERATE', 'PASSIVE'],
-  homework: ['ALWAYS_COMPLETED', 'USUALLY_COMPLETED', 'RARELY_COMPLETED'],
-  conduct: ['EXCELLENT', 'GOOD', 'NEEDS_IMPROVEMENT'],
-};
-
-const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-
-const monthLabel = (m: string) => {
-  const [y, mm] = m.split('-');
-  return `${MONTH_NAMES[Number(mm) - 1] || mm} ${y}`;
+const LEVEL_OPTIONS: Record<'performance' | 'participation' | 'homework' | 'conduct', readonly string[]> = {
+  performance: performanceLevels,
+  participation: participationLevels,
+  homework: homeworkLevels,
+  conduct: conductLevels,
 };
 
 const clampSessions = (v: string) => Math.min(400, Math.max(1, Math.round(Number(v) || 0) || 1));
@@ -336,9 +323,15 @@ export default function MonthlyEntryView({
 
   const checklistRows = useMemo(() => {
     if (!checklist) return [];
-    const entries = checklist.entries.map((e) => ({ ...e, kind: 'entry' as const }));
-    const planned = checklist.planned.map((p) => ({ ...p, kind: 'planned' as const }));
-    return [...entries, ...planned].sort((a, b) => a.className.localeCompare(b.className) || a.subjectName.localeCompare(b.subjectName));
+    const seen = new Set<string>();
+    const rows: (ChecklistItem & { kind: 'entry' | 'planned' })[] = [];
+    for (const item of [...checklist.entries.map((e) => ({ ...e, kind: 'entry' as const })), ...checklist.planned.map((p) => ({ ...p, kind: 'planned' as const }))]) {
+      const key = `${item.classId}|${item.subjectId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(item);
+    }
+    return rows.sort((a, b) => a.className.localeCompare(b.className) || a.subjectName.localeCompare(b.subjectName));
   }, [checklist]);
 
   const lateAbsentTotal = Object.values(rows).filter((r) => !r.punctuality).length;

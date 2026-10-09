@@ -29,6 +29,40 @@ export const punctualityLabels: Record<Punctuality, string> = {
   ALWAYS_ABSENT: 'Always Absent',
 };
 
+/** Ordinal weight per category; the rounded mean of these names an aggregate result. */
+export const PUNCTUALITY_SCORE: Record<Punctuality, number> = {
+  ALWAYS_ON_TIME: 3,
+  USUALLY_ON_TIME: 2,
+  OCCASIONALLY_LATE: 1,
+  FREQUENTLY_LATE: 0,
+  OCCASIONALLY_ABSENT: -1,
+  FREQUENTLY_ABSENT: -2,
+  ALWAYS_ABSENT: -3,
+};
+const SCORE_LABEL = Object.fromEntries(
+  Object.entries(PUNCTUALITY_SCORE).map(([k, v]) => [v, punctualityLabels[k as Punctuality]]),
+) as Record<number, string>;
+
+/**
+ * §193 v3: every session votes its category's ordinal weight and the rounded mean
+ * names the result — the same weighted-average idea performance and conduct use.
+ * A single teacher's pick is uniform across sessions, so one-subject reports still
+ * echo it exactly; a multi-subject student reports average severity instead of a
+ * bare plurality that could headline "Always On Time" on a mostly-late month.
+ */
+export function punctualityResultFromTally(counts: Record<string, number>): string | null {
+  let total = 0;
+  let sum = 0;
+  for (const [key, count] of Object.entries(counts)) {
+    const score = PUNCTUALITY_SCORE[key as Punctuality];
+    if (score === undefined || !count) continue;
+    total += count;
+    sum += score * count;
+  }
+  if (!total) return null;
+  return SCORE_LABEL[Math.max(-3, Math.min(3, Math.round(sum / total)))] ?? null;
+}
+
 const level = <T extends readonly [string, ...string[]]>(values: T) =>
   z.enum(values as unknown as [string, ...string[]]).nullable().optional();
 

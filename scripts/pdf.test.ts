@@ -1,7 +1,8 @@
 import assert from 'node:assert';
 import test from 'node:test';
 import { inflateSync } from 'node:zlib';
-import { buildStudentPdf, buildClassSummaryPdf, buildClassReportsZip } from '../src/lib/reportPdf';
+import { buildStudentPdf, buildClassSummaryPdf, buildClassReportsZip, loadLogoDataUrl } from '../src/lib/reportPdf';
+import { FALLBACK_LOGO_DATA_URL } from '../src/lib/defaultLogo';
 import { buildPeriod } from '../src/lib/period';
 import { groupReports, groupReportsByMonth, summarize, summarizeByMonth, type Observation } from '../src/lib/reporting';
 import type { Rules } from '../src/lib/reporting';
@@ -143,13 +144,27 @@ test('pdf: student follow-up embeds the organization logo', async () => {
     overall: summarize(rows, RULES),
     raw: rows,
     rules: RULES,
-    logoDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    logoDataUrl: await loadLogoDataUrl('/icons/school_logo.png'),
   });
 
   const buf = Buffer.from(doc.output('arraybuffer') as ArrayBuffer);
   assert.equal(header(buf), '%PDF-', 'output must be a real PDF header');
+  assert.ok(buf.includes(Buffer.from('/Subtype /Image')), 'the logo must be embedded as an image XObject');
   const text = pdfText(buf);
   assert.ok(text.includes('Maarif International Schools'), 'organization name must appear in the document text');
+});
+
+test('logo: the logo resolves to an embeddable data URL even when it cannot be fetched', async () => {
+  const bundled = await loadLogoDataUrl(null);
+  assert.ok(bundled.startsWith('data:image/png;base64,'), `a missing logo must fall back to the bundled logo, got ${bundled.slice(0, 32)}`);
+  assert.equal(bundled, FALLBACK_LOGO_DATA_URL, 'the fallback must be the bundled school logo');
+  assert.ok(bundled.length > 1000, 'the bundled logo must carry real image bytes');
+
+  const unreachable = await loadLogoDataUrl('/icons/school_logo.png');
+  assert.ok(unreachable.startsWith('data:image/png;base64,'), `an unfetchable logo must still resolve to image bytes, got ${unreachable.slice(0, 32)}`);
+
+  const dataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  assert.equal(await loadLogoDataUrl(dataUri), dataUri, 'a data URI logo must be used as-is outside the browser');
 });
 
 test('pdf: class summary covers every student-subject row and lists every month', async () => {

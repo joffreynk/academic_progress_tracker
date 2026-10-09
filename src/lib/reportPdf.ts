@@ -1,5 +1,6 @@
 'use client';
 import { monthLabelShort, periodLabel, periodSlug, type Period } from '@/lib/period';
+import { FALLBACK_LOGO_DATA_URL } from '@/lib/defaultLogo';
 import { resultTrend, summarize, summarizeByMonth, type Observation, type Rules, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
 
 type Summary = ReturnType<typeof import('@/lib/reporting').summarize> & {
@@ -17,7 +18,7 @@ const WARN: Color = [176, 122, 30];
 const BAD: Color = [186, 96, 74];
 
 export const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-const countText = (values: Record<string, number>) => Object.entries(values).map(([k, v]) => `${pretty(k)} ${v}`).join(', ') || 'No observations';
+const countText = (values: Record<string, number>) => Object.entries(values).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${pretty(k)} ${v}`).join(', ') || 'No observations';
 
 const METRICS: { label: string; render: (m: SubjectMonthSummary) => string; numeric?: (m: SubjectMonthSummary) => number | null }[] = [
   { label: 'Lessons recorded', render: (m) => String(m.lessons), numeric: (m) => m.lessons },
@@ -381,37 +382,76 @@ function save(doc: Doc, filename: string) {
   saveBlob(doc.output('blob'), filename);
 }
 
-/** Loads the organization logo and returns a downscaled PNG data URL the PDF can embed. */
-export async function loadLogoDataUrl(url: string, maxPx = 320): Promise<string | null> {
+async function decodeLogo(source: Blob | string): Promise<{ image: CanvasImageSource; width: number; height: number; release: () => void }> {
+  if (typeof source !== 'string' && typeof createImageBitmap === 'function') {
+    const bitmap = await createImageBitmap(source);
+    return { image: bitmap, width: bitmap.width, height: bitmap.height, release: () => bitmap.close() };
+  }
+  const src = typeof source === 'string' ? source : URL.createObjectURL(source);
   try {
-    let source = url;
-    let objectUrl: string | null = null;
-    if (!url.startsWith('data:')) {
-      const response = await fetch(url, { cache: 'force-cache' });
-      if (!response.ok) return null;
-      objectUrl = URL.createObjectURL(await response.blob());
-      source = objectUrl;
-    }
-    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('Logo could not be decoded.'));
-      img.src = source;
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image();
+      element.onload = () => resolve(element);
+      element.onerror = () => reject(new Error('Logo could not be decoded.'));
+      element.src = src;
     });
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-    const scale = Math.min(1, maxPx / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
-    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
-    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    ctx.drawImage(image, 0, 0, width, height);
-    return canvas.toDataURL('image/png');
+    return {
+      image: img,
+      width: img.naturalWidth || img.width,
+      height: img.naturalHeight || img.height,
+      release: () => { if (src !== source) URL.revokeObjectURL(src); },
+    };
+  } catch (error) {
+    if (src !== source) URL.revokeObjectURL(src);
+    throw error;
+  }
+}
+
+/** Draws the logo into a canvas and returns a downscaled PNG data URL, or null when it cannot be decoded. */
+async function toPngDataUrl(source: Blob | string, maxPx: number): Promise<string | null> {
+  if (typeof document === 'undefined') return null;
+  try {
+    const { image, width, height, release } = await decodeLogo(source);
+    try {
+      const scale = Math.min(1, maxPx / Math.max(width, height, 1));
+      const drawWidth = Math.max(1, Math.round(width * scale));
+      const drawHeight = Math.max(1, Math.round(height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = drawWidth;
+      canvas.height = drawHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(image, 0, 0, drawWidth, drawHeight);
+      return canvas.toDataURL('image/png');
+    } finally {
+      release();
+    }
   } catch {
     return null;
   }
+}
+
+/**
+ * Loads the organization logo and returns a PNG data URL the PDF can embed.
+ * Never resolves to null: any fetch/decode failure falls back to the bundled school logo,
+ * so reports carry a logo both online and offline.
+ */
+export async function loadLogoDataUrl(url?: string | null, maxPx = 320): Promise<string> {
+  if (!url) return FALLBACK_LOGO_DATA_URL;
+  if (url.startsWith('data:')) {
+    if (typeof document === 'undefined') return url;
+    return (await toPngDataUrl(url, maxPx)) || FALLBACK_LOGO_DATA_URL;
+  }
+  try {
+    const response = await fetch(url, { cache: 'force-cache' });
+    if (response.ok) {
+      const embedded = await toPngDataUrl(await response.blob(), maxPx);
+      if (embedded) return embedded;
+    }
+  } catch {
+    // Offline or blocked by CSP — fall through to the browser cache and then the bundled logo.
+  }
+  return (await toPngDataUrl(url, maxPx)) || FALLBACK_LOGO_DATA_URL;
 }
 
 /** Organization name (every wrapped line), report heading, optional right-aligned meta lines and the logo. */
@@ -613,7 +653,7 @@ export async function buildStudentPdf(input: {
 /** Full individual student follow-up: one page, organization name and logo in the header. */
 export async function downloadStudentPdf(input: Parameters<typeof buildStudentPdf>[0] & { logoUrl?: string | null }) {
   const { logoUrl, ...rest } = input;
-  const logoDataUrl = logoUrl ? await loadLogoDataUrl(logoUrl) : null;
+  const logoDataUrl = await loadLogoDataUrl(logoUrl);
   const { doc, filename } = await buildStudentPdf({ ...rest, logoDataUrl });
   save(doc, filename);
 }
@@ -684,7 +724,7 @@ export async function buildClassSummaryPdf(input: {
 /** Whole-class / whole-cohort summary covering every student-subject row in the period. */
 export async function downloadClassSummaryPdf(input: Parameters<typeof buildClassSummaryPdf>[0] & { logoUrl?: string | null }) {
   const { logoUrl, ...rest } = input;
-  const logoDataUrl = logoUrl ? await loadLogoDataUrl(logoUrl) : null;
+  const logoDataUrl = await loadLogoDataUrl(logoUrl);
   const { doc, filename } = await buildClassSummaryPdf({ ...rest, logoDataUrl });
   save(doc, filename);
 }
@@ -720,7 +760,7 @@ export async function buildClassReportsZip(input: {
 /** Downloads every student report in the cohort as one ZIP archive. */
 export async function downloadClassReportsZip(input: Parameters<typeof buildClassReportsZip>[0] & { logoUrl?: string | null }) {
   const { logoUrl, ...rest } = input;
-  const logoDataUrl = logoUrl ? await loadLogoDataUrl(logoUrl) : null;
+  const logoDataUrl = await loadLogoDataUrl(logoUrl);
   const { bytes, filename, count } = await buildClassReportsZip({ ...rest, logoDataUrl });
   saveBlob(new Blob([bytes as BlobPart], { type: 'application/zip' }), filename);
   return { filename, count };
@@ -858,7 +898,7 @@ export async function buildClubReportsZip(input: {
 /** Downloads one report per club member as a single ZIP archive. */
 export async function downloadClubReportsZip(input: Parameters<typeof buildClubReportsZip>[0] & { logoUrl?: string | null }) {
   const { logoUrl, ...rest } = input;
-  const logoDataUrl = logoUrl ? await loadLogoDataUrl(logoUrl) : null;
+  const logoDataUrl = await loadLogoDataUrl(logoUrl);
   const { bytes, filename, count } = await buildClubReportsZip({ ...rest, logoDataUrl });
   saveBlob(new Blob([bytes as BlobPart], { type: 'application/zip' }), filename);
   return { filename, count };

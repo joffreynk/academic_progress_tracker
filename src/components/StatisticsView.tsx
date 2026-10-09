@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Download, BarChart3, TrendingUp, Users, CheckCircle } from 'lucide-react';
 import { buildReportActivitySeries, type Observation, type Rules } from '@/lib/reporting';
-import { punctualityLabels } from '@/lib/monthly';
+import { punctualityLabels, punctualityLevels } from '@/lib/monthly';
 
 const punctualityLabel = (key: string) => punctualityLabels[key as keyof typeof punctualityLabels] ?? key.replaceAll('_', ' ');
 
@@ -318,15 +318,11 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
         {/* CHART 5: Punctuality */}
         <DistributionCard
           title="Punctuality"
-          data={[
-            { label: 'Always On Time', count: stats.punctuality.ALWAYS_ON_TIME || 0, color: '#22a57d' },
-            { label: 'Usually On Time', count: stats.punctuality.USUALLY_ON_TIME || 0, color: '#3b82f6' },
-            { label: 'Occasionally Late', count: stats.punctuality.OCCASIONALLY_LATE || 0, color: '#d79c41' },
-            { label: 'Frequently Late', count: stats.punctuality.FREQUENTLY_LATE || 0, color: '#c67a53' },
-            { label: 'Occasionally Absent', count: stats.punctuality.OCCASIONALLY_ABSENT || 0, color: '#b06a4e' },
-            { label: 'Frequently Absent', count: stats.punctuality.FREQUENTLY_ABSENT || 0, color: '#8a4a32' },
-            { label: 'Always Absent', count: stats.punctuality.ALWAYS_ABSENT || 0, color: '#5f3220' },
-          ]}
+          data={punctualityLevels.map((key, i) => ({
+            label: punctualityLabels[key],
+            count: stats.punctuality[key] || 0,
+            color: ['#22a57d', '#3b82f6', '#d79c41', '#c67a53', '#b06a4e', '#8a4a32', '#5f3220'][i],
+          }))}
         />
 
         <div className="panel sub-panel" style={{ padding: 18, gridColumn: '1 / -1' }}>

@@ -15,7 +15,7 @@ export const isDateKey = (value: string) => {
 };
 
 /** UTC-noon day arithmetic; returns an empty string rather than throwing or silently normalising malformed input. */
-const shiftDays = (date: string, days: number) => { if (!isDateKey(date)) return ''; const d = new Date(`${date}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); };
+export const shiftDays = (date: string, days: number) => { if (!isDateKey(date)) return ''; const d = new Date(`${date}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); };
 
 export const dayBefore = (date: string) => shiftDays(date, -1);
 export const dayAfter = (date: string) => shiftDays(date, 1);

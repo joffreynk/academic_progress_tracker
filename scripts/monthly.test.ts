@@ -139,6 +139,22 @@ test('monthly: every punctuality category round-trips into the report result', (
   assert.strictEqual(unchosen.punctualityResult, 'No data', 'an unchosen draft row still reads as no data');
 });
 
+test('monthly: mixed punctuality reports the severity average, not a bare plurality', () => {
+  // Real class-10 case: "Always On Time" is the biggest single bucket (171) but
+  // late/absent sessions are the majority together, so it must not win the headline.
+  const observations = [
+    ...entryObservations(entry({ id: 'e1', sessionsHeld: 171 }), [row({ punctuality: 'ALWAYS_ON_TIME' })], 'Class 10', 'Biology', 'A. Teacher', RULES),
+    ...entryObservations(entry({ id: 'e2', sessionsHeld: 111 }), [row({ punctuality: 'OCCASIONALLY_LATE' })], 'Class 10', 'Chemistry', 'B. Teacher', RULES),
+    ...entryObservations(entry({ id: 'e3', sessionsHeld: 36 }), [row({ punctuality: 'OCCASIONALLY_ABSENT' })], 'Class 10', 'English', 'C. Teacher', RULES),
+    ...entryObservations(entry({ id: 'e4', sessionsHeld: 25 }), [row({ punctuality: 'FREQUENTLY_ABSENT' })], 'Class 10', 'French', 'D. Teacher', RULES),
+  ];
+  const summary = summarize(observations, RULES);
+  assert.strictEqual(summary.lessons, 343, 'every synthetic session counts');
+  // (171×3 + 111×1 + 36×−1 + 25×−2) / 343 = 1.57 → "Usually On Time".
+  assert.strictEqual(summary.punctualityResult, 'Usually On Time', 'severity average replaces the misleading plurality');
+  assert.strictEqual(summary.punctuality.ALWAYS_ON_TIME, 171, 'the raw distribution stays intact');
+});
+
 test('monthly: groupReports sees the entry as a normal student-subject report', () => {
   const observations = [
     ...entryObservations(entry(), [row()], 'Class 7A', 'Mathematics', 'A. Teacher', RULES),

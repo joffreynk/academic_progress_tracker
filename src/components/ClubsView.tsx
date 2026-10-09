@@ -3,6 +3,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Plus, RefreshCw, CheckCircle2, Edit3, Trash2, X, Search, Users, Clock3, FileArchive, Wand2, ClipboardList } from 'lucide-react';
 import type { ModalConfig } from '@/components/Modal';
 import { downloadClubReportsZip } from '@/lib/reportPdf';
+import { punctualityLabels, punctualityLevels, performanceLevels, participationLevels, conductLevels } from '@/lib/monthly';
 
 type Club = { id: string; name: string; description: string | null; academicYearId: string | null; active: boolean };
 type ClubTeacherRow = { clubId: string; teacherId: string; role: string; teacherName: string; active: boolean };
@@ -29,20 +30,12 @@ type ClubForm = { id?: string; name: string; description: string; academicYearId
 type MemberRecord = { punctuality: string | null; performance: string | null; participation: string | null; conduct: string | null; comment: string };
 type ActivityForm = { id?: string; clubId: string; title: string; activityDate: string; description: string; records: Record<string, MemberRecord> };
 
-const PUNCTUALITY_OPTIONS = [
-  ['ALWAYS_ON_TIME', 'Always On Time'],
-  ['USUALLY_ON_TIME', 'Usually On Time'],
-  ['OCCASIONALLY_LATE', 'Occasionally Late'],
-  ['FREQUENTLY_LATE', 'Frequently Late'],
-  ['OCCASIONALLY_ABSENT', 'Occasionally Absent'],
-  ['FREQUENTLY_ABSENT', 'Frequently Absent'],
-  ['ALWAYS_ABSENT', 'Always Absent'],
-] as const;
+const PUNCTUALITY_OPTIONS = punctualityLevels.map((k) => [k, punctualityLabels[k]] as const);
 
-const LEVEL_OPTIONS: Record<'performance' | 'participation' | 'conduct', string[]> = {
-  performance: ['EXCELLENT', 'GOOD', 'NEEDS_IMPROVEMENT'],
-  participation: ['ACTIVE', 'MODERATE', 'PASSIVE'],
-  conduct: ['EXCELLENT', 'GOOD', 'NEEDS_IMPROVEMENT'],
+const LEVEL_OPTIONS: Record<'performance' | 'participation' | 'conduct', readonly string[]> = {
+  performance: performanceLevels,
+  participation: participationLevels,
+  conduct: conductLevels,
 };
 
 const defaultRecord = (): MemberRecord => ({ punctuality: 'ALWAYS_ON_TIME', performance: 'GOOD', participation: 'ACTIVE', conduct: 'GOOD', comment: '' });

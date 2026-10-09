@@ -47,8 +47,8 @@ import ClubsView from '@/components/ClubsView';
 import MonthlyEntryView from '@/components/MonthlyEntryView';
 import PeriodPicker from '@/components/PeriodPicker';
 import { resultTrend, type Observation, type Rules, type SubjectComparison } from '@/lib/reporting';
-import { thisMonthPeriod, buildPeriod, periodLabel, periodSlug, type Period } from '@/lib/period';
-import { downloadClassSummaryPdf, downloadClassReportsZip } from '@/lib/reportPdf';
+import { thisMonthPeriod, buildPeriod, periodLabel, periodSlug, monthLabel, shiftDays, type Period } from '@/lib/period';
+import { downloadClassSummaryPdf, downloadClassReportsZip, pretty } from '@/lib/reportPdf';
 import { importFields, requiredImportFields, safeCsvCell, toCsv, type ImportKind } from '@/lib/importing';
 import { readImageFile, LOGO_ACCEPT } from '@/lib/logo';
 import { readImportFile } from '@/lib/importFile';
@@ -363,19 +363,6 @@ const NOT_APPLICABLE = (
 
 const naCell = (notApplicable: boolean, control: React.ReactNode) =>
   notApplicable ? NOT_APPLICABLE : control;
-
-const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-
-const monthTag = (m: string) => {
-  if (!/^\d{4}-\d{2}$/.test(m || '')) return m;
-  return new Date(`${m}-01T12:00:00Z`).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-};
-
-const shiftDays = (date: string, days: number) => {
-  const d = new Date(`${date}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-};
 
 const dayLabel = (days: number) => `${days} day${days === 1 ? '' : 's'}`;
 
@@ -1675,7 +1662,7 @@ export default function Home() {
                         Review Monthly Record: Class {monthlyReviewDetail.className} · {monthlyReviewDetail.subjectName}
                       </h2>
                       <p>
-                        Month: {monthTag(monthlyReviewDetail.month)} · Teacher: {monthlyReviewDetail.teacherName || '—'} · Current Status: <Badge status={monthlyReviewDetail.entry.status} />
+                        Month: {monthLabel(monthlyReviewDetail.month)} · Teacher: {monthlyReviewDetail.teacherName || '—'} · Current Status: <Badge status={monthlyReviewDetail.entry.status} />
                       </p>
                       <p style={{ fontSize: 13, color: '#748792' }}>
                         Sessions held: {monthlyReviewDetail.entry.sessionsHeld}
@@ -1837,7 +1824,7 @@ export default function Home() {
                       <tbody>
                         {reports.map((r) => (
                           <tr key={r.id}>
-                            <td style={{ whiteSpace: 'nowrap' }}>{r.month ? monthTag(r.month) : r.lessonDate}</td>
+                            <td style={{ whiteSpace: 'nowrap' }}>{r.month ? monthLabel(r.month) : r.lessonDate}</td>
                             <td><strong>{r.className}</strong></td>
                             <td>{r.subjectName}</td>
                             {user.role === 'ADMIN' && <td>{r.teacherName}</td>}

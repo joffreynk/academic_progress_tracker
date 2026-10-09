@@ -1,4 +1,4 @@
-import { punctualityLabels } from './monthly';
+import { punctualityResultFromTally } from './monthly';
 export type Observation={lessonDate:string;topic:string;lessonId:string;status:string;studentId:string;studentName:string;studentCode:string;className:string;subjectName:string;teacherName?:string;attendance:string;performance:string|null;conduct:string|null;punctuality:string|null;homework:string|null;participation:string|null;comment:string|null;source?:'lesson'|'monthly'};
 export type Rules={version:number;excellentThreshold:number;goodThreshold:number;homeworkUsuallyThreshold:number;punctualityOccasionallyMax:number}|undefined;
 export type MonthlyTrend={month:string;lessons:number;attendanceRate:number|null;performanceResult:string;homeworkResult:string;participationResult:string;conductResult:string;punctualityResult:string};
@@ -6,9 +6,10 @@ export type NormalRecord={attendance:'PRESENT'|'LATE'|'ABSENT';performance:'EXCE
 const tally=(values:(string|null)[])=>values.reduce<Record<string,number>>((a,v)=>{if(v)a[v]=(a[v]||0)+1;return a;},{})
 const scored=(counts:Record<string,number>,positive:string,mid:string,negative:string,rules:Rules)=>{const total=(counts[positive]||0)+(counts[mid]||0)+(counts[negative]||0);if(!total)return 'No data';const avg=((counts[positive]||0)*3+(counts[mid]||0)*2+(counts[negative]||0))/total;return avg>=(rules?.excellentThreshold??2.65)?positive:avg>=(rules?.goodThreshold??1.65)?mid:negative;};
 export function buildNormalRecordDefaults(): NormalRecord { return { attendance: 'PRESENT', performance: 'GOOD', conduct: 'GOOD', punctuality: 'ALWAYS_ON_TIME', homework: 'ALWAYS_COMPLETED', participation: 'ACTIVE', comment: '' }; }
-// Monthly records answer with the exact category the teacher picked (all seven values);
-// legacy dated records keep the §48 late-rate derivation below.
-const monthlyPunctualityResult=(rows:Observation[]):string|null=>{if(!rows.some(r=>r.source==='monthly'))return null;const counts=tally(rows.filter(r=>r.source==='monthly').map(r=>r.punctuality));const top=Object.entries(counts).sort((a,b)=>b[1]-a[1])[0];return top?punctualityLabels[top[0] as keyof typeof punctualityLabels]??null:null;};
+// Monthly records answer with the severity-weighted average of the seven punctuality
+// categories (absence included), so a mostly-late month can never headline "Always On
+// Time"; legacy dated records keep the §48 late-rate derivation below.
+const monthlyPunctualityResult=(rows:Observation[]):string|null=>{if(!rows.some(r=>r.source==='monthly'))return null;const counts=tally(rows.filter(r=>r.source==='monthly').map(r=>r.punctuality));return punctualityResultFromTally(counts);};
 export function buildReportActivitySeries(rows: Observation[]) {
   const buckets = new Map<string, { date: string; submitted: number; approved: number; returned: number; total: number }>();
   rows.forEach((row) => {
