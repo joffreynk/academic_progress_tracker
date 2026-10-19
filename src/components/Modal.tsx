@@ -24,7 +24,10 @@ export type ModalConfig =
       studentId: string;
       studentName: string;
       classId?: string;
+      date?: string;
+      minDate?: string;
       onConfirm: (data: {
+        date: string;
         category: string;
         severity: string;
         description: string;
@@ -178,8 +181,9 @@ function DateCorrectionModal({ config, onClose }: { config: Extract<ModalConfig,
 }
 
 function BehaviourModal({ config, onClose }: { config: Extract<ModalConfig, { type: 'behaviour' }>; onClose: () => void }) {
-  const [category, setCategory] = useState('DISRUPTION');
-  const [severity, setSeverity] = useState('MEDIUM');
+  const [date, setDate] = useState(config.date || new Date().toISOString().slice(0, 10));
+  const [category, setCategory] = useState('Behaviour');
+  const [severity, setSeverity] = useState('MODERATE');
   const [description, setDescription] = useState('');
   const [actionTaken, setActionTaken] = useState('');
   const [followUp, setFollowUp] = useState(false);
@@ -196,23 +200,32 @@ function BehaviourModal({ config, onClose }: { config: Extract<ModalConfig, { ty
         </p>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <label>
+            Date
+            <input
+              type="date"
+              value={date}
+              min={config.minDate}
+              max={config.date}
+              onChange={(e) => setDate(e.target.value)}
+            />
+          </label>
+          <label>
             Category
             <select value={category} onChange={(e) => setCategory(e.target.value)}>
-              <option value="DISRUPTION">Disruption</option>
-              <option value="BULLYING">Bullying / Conflict</option>
-              <option value="HOMEWORK_NEGLECT">Homework Neglect</option>
-              <option value="PARTICIPATION_DROP">Participation Drop</option>
-              <option value="EXCELLENT_CITIZENSHIP">Positive Recognition</option>
-              <option value="OTHER">Other Observation</option>
+              <option value="Behaviour">Behaviour / Conduct</option>
+              <option value="Academic">Academic</option>
+              <option value="Homework">Homework</option>
+              <option value="Participation">Participation</option>
+              <option value="Punctuality">Punctuality</option>
+              <option value="Other">Other Observation</option>
             </select>
           </label>
           <label>
             Severity
             <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
               <option value="LOW">Low (Noted)</option>
-              <option value="MEDIUM">Medium (Needs Monitoring)</option>
+              <option value="MODERATE">Moderate (Needs Monitoring)</option>
               <option value="HIGH">High (Parent / Admin Attention)</option>
-              <option value="URGENT">Urgent (Immediate Action)</option>
             </select>
           </label>
         </div>
@@ -247,9 +260,10 @@ function BehaviourModal({ config, onClose }: { config: Extract<ModalConfig, { ty
         <button className="btn outline" onClick={onClose}>Cancel</button>
         <button
           className="btn primary"
-          disabled={!description.trim()}
+          disabled={!description.trim() || !date}
           onClick={() => {
             config.onConfirm({
+              date,
               category,
               severity,
               description: description.trim(),

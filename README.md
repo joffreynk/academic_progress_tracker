@@ -12,7 +12,7 @@ A multi-organization academic and behavioural reporting application. Next.js App
 
 For local-only sample data, the demo seed remains available, but it should be treated as disposable and not as the default application login. Use the setup flow to create your own administrator and keep the real credentials in a local file such as `logins.text`, which is ignored by Git.
 
-Run the tests with `npm test` (business rules `scripts/rules.test.ts`, the password rule `scripts/password.test.ts`, PDF output `scripts/pdf.test.ts` and the monthly record helpers `scripts/monthly.test.ts`), or a single file with `npx tsx --test scripts/rules.test.ts`. With `npm run dev` running, four smoke suites replay the full app against the local server: `npx tsx scripts/local-app-test.ts` (the whole application, 130 checks — auth, roles, reports, review, entities, imports, subject rosters, club members, account changes), `npx tsx scripts/local-import-test.ts` (imports and role logins), `npx tsx scripts/local-clubs-test.ts` (the club workflow with review) and `npx tsx scripts/local-monthly-test.ts` (the monthly record workflow end to end).
+Run the tests with `npm test` (business rules `scripts/rules.test.ts`, the password rule `scripts/password.test.ts`, PDF output `scripts/pdf.test.ts` and the monthly record helpers `scripts/monthly.test.ts`), or a single file with `npx tsx --test scripts/rules.test.ts`. With `npm run dev` running, four smoke suites replay the full app against the local server: `npx tsx scripts/local-app-test.ts` (the whole application, 135 checks — auth, roles, reports, review, entities, imports, subject rosters, club members, account changes), `npx tsx scripts/local-import-test.ts` (imports and role logins), `npx tsx scripts/local-clubs-test.ts` (the club workflow with review) and `npx tsx scripts/local-monthly-test.ts` (the monthly record workflow end to end).
 
 ## Excel / CSV import format
 
@@ -20,7 +20,7 @@ The app supports bulk import for students and teachers (together with their teac
 
 Upload order matters: **students first, then teachers.** The students file defines the academic year (from its file name), and the teachers file then attaches its assignments to that year.
 
-Upload the generated `students-import-2026-2027.xlsx` and `teachers-import-2026-2027.xlsx` (see below) rather than the raw school lists: the raw students workbook still contains the MP sheets, which would create MP grades and classes.
+Upload the generated `students-import-2026-2027.xlsx` and `teachers-import-2026-2027.xlsx` (see below) rather than the raw school lists: the raw students workbook still contains the MP sheets, which would create MP year levels and classes.
 
 ### Students workbook
 
@@ -32,12 +32,12 @@ Every worksheet that carries a `No | Name | Surname | Year` header row is read, 
 
 How it works:
 - Title rows above the header are skipped and all sheets in the workbook are scanned.
-- `Year` holds the class (`MP1`, `7A`, `10`); the grade is derived from it (`7A` → `Grade 7`, `MP1` → `MP`).
+- `Year` holds the class (`MP1`, `7A`, `10`); the year level is derived from it (`7A` → `Year 7`, `MP1` → `MP`).
 - `Student ID` is generated as `<Year>-<Class>-<No>` so a later year's file never overwrites another child's record.
 - The academic year comes from the file name (`List of students 2026-2027.xlsx` → `2026-2027`).
-- Missing grades, classes and academic years are created during the import. `Status` is optional: when the file has no `Status` column the row keeps its current status (a new student is `ACTIVE`); when it does, only `ACTIVE` and `INACTIVE` are accepted.
+- Missing years, classes and academic years are created during the import. `Status` is optional: when the file has no `Status` column the row keeps its current status (a new student is `ACTIVE`); when it does, only `ACTIVE` and `INACTIVE` are accepted.
 
-The workbook must use this `No | Name | Surname | Year` layout — the grade, class, academic year and student ID are all derived from it, and sheets without that header row are ignored (which is how instruction sheets are skipped).
+The workbook must use this `No | Name | Surname | Year` layout — the year, class, academic year and student ID are all derived from it, and sheets without that header row are ignored (which is how instruction sheets are skipped).
 
 `npx tsx scripts/build-import-files.ts` rebuilds two ready-to-upload workbooks from your own lists: `students-import-2026-2027.xlsx` (one sheet per class, MP sheets removed) and `teachers-import-2026-2027.xlsx` (one row per teacher, subject codes expanded to full names). Both carry a READ ME sheet.
 
@@ -58,6 +58,18 @@ How it works:
 
 The detected columns are matched to the import format automatically and shown for review (they cannot be mapped by hand), then an explicit confirmation. The server validates each row, creates the missing school records and reports row-level errors, which can be downloaded as an error CSV. Re-running the same file updates the existing records instead of duplicating them, and never revives a student you deactivated.
 
+## Student management
+
+The **Students** page provides rosters, enrollment status and longitudinal profiles. Students themselves are created either one at a time (**Management → Students**) or in bulk (**Import**).
+
+- **Create a single student** — on **Management → Students**, fill in *Student ID*, *First name*, *Last name*, *Year*, *Class* and *Academic year*, then **Create Student**. Picking a class auto-fills the year level and academic year, and the server re-checks that the class really belongs to that level and year. The same tab lists the students with search, edit and deactivate.
+- **Search** — search by student name, student ID, or class name.
+- **Filter** — select a specific class cohort. Choosing *All Cohorts* clears the list rather than keeping the previous cohort on screen; a teacher must keep a class selected because teachers may only read their own assigned roster.
+- **Sort** — toggle between alphabetical by name (default) or grouped by class.
+- **Student profile** — **Profile** opens a modal with the full timeline (lesson records, monthly records, and significant pastoral observations).
+- **Log Observation** — records a pastoral note against that specific student (date, category, severity, description, optional action taken and follow-up flag).
+- **Terminology** — the school says **Year** (e.g., Year 7), never Grade: the **Years** management tab defines year levels, while **Academic Years** stays for calendar years like 2026-2027.
+
 ## Report workflow
 
 Reports — legacy dated lesson reports and monthly records alike — run through one review machine. A legacy dated report carries a class, subject, lesson date within the organization's policy window and a topic; the server checks the year, term, assignment and active class roster (or the saved subject group), requires that roster and comments for improvement observations on submission, and commits the lesson and its observations in a single operation. Drafts and returned reports can be revised; approved reports are read-only for teachers. The admin reviews, approves or returns reports with a reason, can make reason-required date corrections, and can close/reopen months. Teachers may delete only their own drafts. Admins can activate/deactivate teachers (revoking their sessions), inspect student timelines, and review optional significant observations; super admins can reset primary-admin access (revoking sessions).
@@ -72,7 +84,7 @@ The monthly record is the only capture path: the teacher's **Monthly Record** en
 
 - One record per class, subject and calendar month: `sessionsHeld` and **Content Covered** at the top, then the roster with one **Punctuality & attendance** select per student (Always On Time, Occasionally Late, Frequently Late, Occasionally Absent, Frequently Absent) plus one level each for performance, participation, homework and conduct, and an optional comment. The category is stored as-is and expanded into session counts for reports (`punctualityCounts()`), so report attendance and §48 punctuality always match what was selected.
 - The filing checklist (`view=monthlyEntries`) lists every assignment for the month with its status, **Missing** rows open a blank form. Submitting requires every student on the record's roster, non-empty **Content Covered**, a punctuality choice for every student and all four levels everywhere; a `NEEDS_IMPROVEMENT` performance/conduct level requires a comment. Unknown categories are rejected (400); months in the future or closed by the admin are rejected (409).
-- **Subject groups (teacher-managed rosters):** the monthly form's **Manage students** button opens a club-style search + checkbox panel — the same pattern administrators use for club members — where the teacher ticks which students of the class take that subject. The saved group drives the form rows, the submit rule and report completion counts (`rosterCount`); saving an empty selection (or **Use whole class**) restores the default whole-class roster, so grades that stream subjects later need no setup up front. Teachers can only manage groups for their own assignments and admins for any class (`saveSubjectRoster`, `view=subjectRoster`, table `subject_students`, migration `0007`). Classes are year-scoped, so each academic year starts fresh on the whole-class default.
+- **Subject groups (teacher-managed rosters):** the monthly form's **Manage students** button opens a club-style search + checkbox panel — the same pattern administrators use for club members — where the teacher ticks which students of the class take that subject. The saved group drives the form rows, the submit rule and report completion counts (`rosterCount`); saving an empty selection (or **Use whole class**) restores the default whole-class roster, so year levels that stream subjects later need no setup up front. Teachers can only manage groups for their own assignments and admins for any class (`saveSubjectRoster`, `view=subjectRoster`, table `subject_students`, migration `0007`). Classes are year-scoped, so each academic year starts fresh on the whole-class default.
 - The workflow is the report review machine: `DRAFT → SUBMITTED → UNDER_REVIEW → APPROVED | RETURNED`, through the same admin review drawer and `review` action (`entityType: monthly_entry` in the audit log). Only drafts and returned records are editable; a returned record keeps its review note until it is resubmitted; teachers may delete only their own drafts/returned records.
 - Monthly records flow into every report surface: `view=monthly` excludes that month's legacy dated rows for the same class+subject (a monthly record replaces them, never mixes) and expands the entry into one observation per held session; `view=reports` shows legacy and monthly rows together with a month tag; student profiles gain the monthly timeline row. Titles, thresholds, exports and PDFs are unchanged.
 - **Class Reports ZIP** in the class summary toolbar (`buildClassReportsZip` in `src/lib/reportPdf.ts`, `jszip`) downloads one PDF per student of the class in a single ZIP.
@@ -89,9 +101,40 @@ Co-curricular clubs live on the **Clubs** page, available to administrators and 
 
 Data lives in `clubs`, `club_teachers`, `club_members` and `club_activities` (migration `0003`); the UI is `src/components/ClubsView.tsx`.
 
+## Monthly reports, behaviour log and dashboards
+
+- **Monthly Reports** — the read surface for the §193 records. Choose a period, then filter by class, subject, academic year, **term** and teacher; the comparison table shows one row per student-subject with month columns, colour-coded result pills and month-over-month arrows, and selecting a student opens the full on-screen report (performance, discipline, teacher comment, clubs, report information). Exports: per-student and per-subject Excel plus PDF (student report and whole-class ZIP). A term filter narrows the result to the term whose dates overlap each month.
+- **Behaviour & Pastoral Care** — the school-wide log of pastoral observations. Each row shows date, student, class, category, severity, description, action taken, the teacher who filed it and a follow-up flag. **Follow-up required only** narrows the queue and **Resolve** clears the flag. Categories are `Behaviour`, `Academic`, `Homework`, `Participation`, `Punctuality`, `Other`; severities are `LOW`, `MODERATE`, `HIGH`; the date defaults to today's school date and must sit inside the organization's report window. Observations are recorded per student from the **Students** roster (**Log Observation**); the behaviour page's own button takes you to that roster. Administrators may resolve any follow-up, a teacher only their own.
+- **Statistics** — academic and behavioural distribution analytics for a generated monthly report (counts and percentages per criterion, with Excel export). It prompts you to generate the monthly report first when there is nothing to analyse.
+- **Data Quality** — the administrative integrity dashboard: draft and returned report queues over a chosen date range, with one-click navigation into the report.
+
+## Entity management (Manage page)
+
+The **Manage** tab lets administrators create, edit, search, and deactivate core entities:
+
+- **Entity types**: Academic Years, Terms, Years, Classes, Subjects, Students, Teachers, Assignments.
+- **Search/filter** — each entity list has a search box filtering by relevant fields (e.g., assignments by teacher, subject, class, year; students by name or student ID).
+- **Edit** — inline modal updates any field; for assignments, changing the teacher/class/subject/year tuple **deactivates the old row** (preserving history) and creates a new active assignment. The old teacher's name is shown in the success toast as "removed from X".
+- **Deactivate / Delete** — the trash action is only offered for entity types the server accepts:
+  - Classes, Subjects, Terms, Years: soft deactivate (`active=false`).
+  - Students: soft deactivate (`status='INACTIVE'`); a re-import never revives them.
+  - Assignments: **hard delete** from `teacher_assignments`; audit log records the teacher, class, subject and year for traceability.
+  - Clubs: archived from the **Clubs** page, not from here.
+  - **Academic Years and Teachers have no delete.** Academic year deletion is refused by the API (years are the anchor of terms, classes and assignments); teachers are deactivated from **Edit → Active Status**, which also revokes their sessions.
+- **Teacher password reset** — admin can reset a teacher's password from the list; new credentials shown once.
+- **Terms** — a Term belongs to an academic year and carries its own start/end dates. Terms gate legacy dated reports (`saveMonthlyRecord` and admin date corrections refuse a date no active term covers) and drive the **Term** filter on the **Monthly Reports** page, where a month is matched to the term whose range overlaps it. Terms are optional for the §193 monthly workflow, which keys off calendar months and academic years.
+
 ## Security notes
 
-Sessions are random server-stored tokens, hashed at rest, HttpOnly, SameSite=Lax and Secure in production. Passwords use bcrypt. Every password entry point shares one rule — **at least 6 characters with an uppercase letter, a lowercase letter, a number and a symbol** — enforced on the server for first-run setup, password change, admin create/reset and teacher create/reset, shown in the reset dialog (the confirm button stays disabled until the rule is met, with the failing part named inline), and satisfied by generated passwords (`src/lib/password.ts`, `src/lib/passwordSchema.ts`). Every signed-in user changes their own password from the top bar's **Change Password** button — the server ends the session, so the next step is signing in with the new password — and administrators rename their own username in **Settings → My Account**, where a name already taken by another account is rejected. Auth and data requests are server-authorized; teacher permissions use active assignments and tenant IDs taken from the authenticated session, never the payload. Failed-login throttling and origin checks are enabled. Audit entries record material changes. Keep `DATABASE_URL`, `SETUP_TOKEN`, passwords and all generated credentials out of version control. Distribute initial teacher passwords securely and require users to change them. CSV exports guard against formula injection.
+Sessions are random server-stored tokens, hashed at rest, HttpOnly, SameSite=Lax and Secure in production. Passwords use bcrypt. Every password entry point shares one rule — **at least 6 characters with an uppercase letter, a lowercase letter, a number and a symbol** — enforced on the server for first-run setup, password change, admin create/reset and teacher create/reset, shown in the reset dialog (the confirm button stays disabled until the rule is met, with the failing part named inline), and satisfied by generated passwords (`src/lib/password.ts`, `src/lib/passwordSchema.ts`). Every signed-in user changes their own password from the top bar's **Change Password** button — the server revokes **every session for that account**, so the next step is signing in with the new password — and administrators rename their own username in **Settings → My Account**, where a name already taken by another account is rejected. Auth and data requests are server-authorized; teacher permissions use active assignments and tenant IDs taken from the authenticated session, never the payload. Failed-login throttling and origin checks are enabled. Audit entries record material changes. Keep `DATABASE_URL`, `SETUP_TOKEN`, passwords and all generated credentials out of version control. Distribute initial teacher passwords securely and require users to change them. CSV exports guard against formula injection.
+
+## Audit log
+
+The **Audit** page (admin only) shows a chronological trail of administrative and evaluation events:
+
+- **User column** displays the actor's **username** (not a UUID).
+- **Metadata Snapshot** column shows structured context (e.g., assignment deletion records the teacher, class, subject, academic year; reassignment records the new teacher).
+- Actions include entity create/update/deactivate, report review transitions, month close/reopen, import, club activity lifecycle, date corrections, admin settings changes, and more.
 
 ## Database
 

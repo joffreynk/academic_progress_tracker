@@ -1,7 +1,7 @@
 'use client';
-import { monthLabelShort, periodLabel, periodSlug, type Period } from '@/lib/period';
+import { monthLabel, monthLabelShort, periodLabel, periodMonthsLabel, periodSlug, type Period } from '@/lib/period';
 import { FALLBACK_LOGO_DATA_URL } from '@/lib/defaultLogo';
-import { resultTrend, summarize, summarizeByMonth, type Observation, type Rules, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
+import { resultTrend, summarize, summarizeByMonth, type Observation, type Rules, type StudentClubSummary, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
 
 type Summary = ReturnType<typeof import('@/lib/reporting').summarize> & {
   studentId: string; studentName: string; studentCode: string; className: string; subjectName: string; teacherName?: string;
@@ -20,13 +20,14 @@ const BAD: Color = [186, 96, 74];
 export const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const countText = (values: Record<string, number>) => Object.entries(values).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${pretty(k)} ${v}`).join(', ') || 'No observations';
 
-const METRICS: { label: string; render: (m: SubjectMonthSummary) => string; numeric?: (m: SubjectMonthSummary) => number | null }[] = [
-  { label: 'Lessons recorded', render: (m) => String(m.lessons), numeric: (m) => m.lessons },
-  { label: 'Performance', render: (m) => (m.performanceResult === 'No data' ? '—' : pretty(m.performanceResult)) },
-  { label: 'Participation', render: (m) => (m.participationResult === 'No data' ? '—' : pretty(m.participationResult)) },
-  { label: 'Homework', render: (m) => m.homeworkResult },
-  { label: 'Conduct', render: (m) => (m.conductResult === 'No data' ? '—' : pretty(m.conductResult)) },
-  { label: 'Punctuality', render: (m) => m.punctualityResult },
+// `key` is the SubjectMonthSummary field each row reads; labels are for display only.
+const METRICS: { label: string; key: keyof SubjectMonthSummary; render: (m: SubjectMonthSummary) => string; numeric?: (m: SubjectMonthSummary) => number | null }[] = [
+  { label: 'Lessons recorded', key: 'lessons', render: (m) => String(m.lessons), numeric: (m) => m.lessons },
+  { label: 'Performance', key: 'performanceResult', render: (m) => (m.performanceResult === 'No data' ? '—' : pretty(m.performanceResult)) },
+  { label: 'Participation', key: 'participationResult', render: (m) => (m.participationResult === 'No data' ? '—' : pretty(m.participationResult)) },
+  { label: 'Homework', key: 'homeworkResult', render: (m) => m.homeworkResult },
+  { label: 'Conduct', key: 'conductResult', render: (m) => (m.conductResult === 'No data' ? '—' : pretty(m.conductResult)) },
+  { label: 'Punctuality', key: 'punctualityResult', render: (m) => m.punctualityResult },
 ];
 
 const fileSafe = (value: string) => value.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '_').slice(0, 80) || 'report';
@@ -134,6 +135,20 @@ class PdfWriter {
     return `${clipped.replace(/\s+$/, '')}…`;
   }
 
+  /** Whole-word truncation: keep the leading words that fit, drop the rest without an ellipsis. */
+  clipWords(value: string, size: number, maxWidth: number, maxLines: number) {
+    const text = String(value ?? '').trim();
+    if (!text || maxLines < 1) return text;
+    let kept = '';
+    for (const word of text.split(/\s+/)) {
+      const candidate = kept ? `${kept} ${word}` : word;
+      if (this.wrap(candidate, size, maxWidth).length > maxLines) break;
+      kept = candidate;
+    }
+    if (kept) return kept;
+    return this.wrap(text, size, maxWidth).slice(0, maxLines).join(' ').trim();
+  }
+
   /** Estimated rendered height of an autoTable call (same font metrics autoTable uses). */
   estimateTable(head: string[], rows: string[][], widths: number[], fontSize: number, pad: number, boldHead = false) {
     const lineH = fontSize * 1.15;
@@ -215,10 +230,18 @@ class PdfWriter {
   /** Row of KPI boxes: uppercase label, bold value, small supporting line. */
   kpiStrip(items: { label: string; value: string; sub?: string; tone?: Color }[]) {
     if (!items.length) return;
-    const height = 34;
-    this.need(height + 8);
     const gap = 6;
+    const subSize = 6;
+    const subLineH = 7.5;
+    const subTop = 31;
+    const maxSubLines = 4;
     const boxWidth = (this.content - gap * (items.length - 1)) / items.length;
+    const inner = boxWidth - 12;
+    // The supporting counts wrap instead of being ellipsised, so every category stays readable.
+    const subs = items.map((item) => (item.sub ? this.clip(item.sub, subSize, inner, maxSubLines) : ''));
+    const subLines = Math.max(1, ...subs.map((sub) => (sub ? this.wrap(sub, subSize, inner).length : 1)));
+    const height = subTop + (subLines - 1) * subLineH + 3;
+    this.need(height + 8);
     const top = this.y;
     items.forEach((item, i) => {
       const x = this.margin + i * (boxWidth + gap);
@@ -226,13 +249,14 @@ class PdfWriter {
       this.doc.setDrawColor(...RULE);
       this.doc.setLineWidth(0.4);
       this.doc.roundedRect(x, top, boxWidth, height, 2.5, 2.5, 'FD');
-      this.doc.setFont('helvetica', 'normal'); this.doc.setFontSize(6); this.doc.setTextColor(...MUTED);
-      this.doc.text(clipLine(this.doc, item.label.toUpperCase(), 6, boxWidth - 12), x + 6, top + 10);
+      this.doc.setFont('helvetica', 'normal'); this.doc.setFontSize(subSize); this.doc.setTextColor(...MUTED);
+      this.doc.text(clipLine(this.doc, item.label.toUpperCase(), subSize, inner), x + 6, top + 10);
       this.doc.setFont('helvetica', 'bold'); this.doc.setFontSize(10); this.doc.setTextColor(...(item.tone ?? INK));
-      this.doc.text(clipLine(this.doc, item.value, 10, boxWidth - 12), x + 6, top + 22);
-      if (item.sub) {
-        this.doc.setFont('helvetica', 'normal'); this.doc.setFontSize(6); this.doc.setTextColor(...MUTED);
-        this.doc.text(clipLine(this.doc, item.sub, 6, boxWidth - 12), x + 6, top + 31);
+      this.doc.text(clipLine(this.doc, item.value, 10, inner), x + 6, top + 22);
+      const sub = subs[i];
+      if (sub) {
+        this.doc.setFont('helvetica', 'normal'); this.doc.setFontSize(subSize); this.doc.setTextColor(...MUTED);
+        this.wrap(sub, subSize, inner).forEach((line, index) => { this.doc.text(line, x + 6, top + subTop + index * subLineH); });
       }
     });
     this.y = top + height + 8;
@@ -340,7 +364,7 @@ function comparisonRows(months: string[], rows: SubjectMonthSummary[]): string[]
       if (a === null || b === null || a === b) return value;
       return `${value} (${a > b ? '+' : ''}${a - b})`;
     }
-    const trend = resultTrend(cell[metric.label as keyof SubjectMonthSummary] as string, previous[metric.label as keyof SubjectMonthSummary] as string);
+    const trend = resultTrend((cell[metric.key] ?? '') as unknown as string, (previous[metric.key] ?? '') as unknown as string);
     return trend === 'flat' ? value : `${value} (${trend === 'up' ? 'improved' : 'declined'})`;
   })]);
 }
@@ -506,9 +530,10 @@ export async function buildStudentPdf(input: {
   school: string; period: Period; closedMonths?: string[]; student: { id: string; name: string; code: string; className: string };
   subjects: Summary[]; overall: ReturnType<typeof import('@/lib/reporting').summarize>;
   comparable?: SubjectComparison[]; overallMonths?: SubjectMonthSummary[]; raw?: Observation[]; rules: Rules;
+  clubs?: StudentClubSummary[];
   logoDataUrl?: string | null;
 }): Promise<{ doc: Doc; filename: string }> {
-  const { school, period, closedMonths = [], student, subjects, overall, comparable = [], overallMonths = [], raw = [], logoDataUrl = null } = input;
+  const { school, period, closedMonths = [], student, subjects, overall, comparable = [], overallMonths = [], raw = [], clubs = [], logoDataUrl = null } = input;
   const months = period.months;
   const doc = await newDoc();
   const w = new PdfWriter(doc);
@@ -536,11 +561,11 @@ export async function buildStudentPdf(input: {
   w.sectionCompact(`${sectionNo++}. Academic performance`);
   const font = 6.5;
   const pad = 2.5;
-  const widths = fitWidths(w.content, [54, 44, 118, 52, 44, 54, 52, 65]);
+  const widths = fitWidths(w.content, [54, 50, 118, 52, 44, 54, 52, 65]);
   const head = ['SUBJECT', 'TEACHER', 'TOPICS COVERED', 'PERF.', 'PART.', 'HOMEWORK', 'CONDUCT', 'PUNCTUALITY'];
   const cellFor = (s: Summary, topicLines: number) => [
     w.clip(s.subjectName, font, widths[0] - pad * 2, 2),
-    w.clip(s.teacherName || '—', font, widths[1] - pad * 2, 2),
+    w.clipWords(s.teacherName || '—', font, widths[1] - pad * 2, 2),
     w.clip(s.topics.join('; ') || '—', font, widths[2] - pad * 2, topicLines),
     w.clip(pretty(s.performanceResult), font, widths[3] - pad * 2, 2),
     w.clip(pretty(s.participationResult), font, widths[4] - pad * 2, 2),
@@ -598,10 +623,24 @@ export async function buildStudentPdf(input: {
     }
   }
 
+  if (clubs.length && w.fits(17 + 24)) {
+    w.sectionCompact(`${sectionNo++}. Clubs & activities`);
+    for (const club of clubs) {
+      const monthsText = club.months.length ? periodMonthsLabel(club.months) : '';
+      const summary = club.activities
+        ? `${club.activities} activit${club.activities === 1 ? 'y' : 'ies'}${monthsText ? ` · ${monthsText}` : ''}${club.latest ? ` · Latest: ${club.latest.title}${club.latest.comment ? ` (${club.latest.comment})` : ''}` : ''}`
+        : `Member · no activities recorded${monthsText ? ` in ${monthsText}` : ' in this period'}`;
+      const line = `${club.clubName} — ${summary}`;
+      const height = w.wrap(line, 7.5, w.content - 12).length * 10.5 + 4;
+      if (!w.fits(height)) break;
+      w.bullet(line, { size: 7.5 });
+    }
+  }
+
   if (raw.length) {
     const recentFont = 6.5;
     const recentPad = 2.5;
-    const recentWidths = fitWidths(w.content, [74, 62, 172, 56, 107]);
+    const recentWidths = fitWidths(w.content, [74, 62, 172, 68, 107]);
     const recentHead = ['DATE(S)', 'SUBJECT', 'TOPIC', 'PERF.', 'COMMENT'];
     const sorted = [...raw].sort((a, b) => b.lessonDate.localeCompare(a.lessonDate));
     type RecentGroup = { from: string; to: string; count: number; subject: string; topic: string; performance: string | null; comment: string | null };
@@ -732,9 +771,9 @@ export async function downloadClassSummaryPdf(input: Parameters<typeof buildClas
 /** One PDF per student for the selected cohort, packed into a single ZIP file (§193). */
 export async function buildClassReportsZip(input: {
   school: string; period: Period; closedMonths?: string[]; summaries: Summary[]; comparison?: SubjectComparison[];
-  data?: Observation[]; rules: Rules; logoDataUrl?: string | null; onProgress?: (done: number, total: number) => void;
+  data?: Observation[]; rules: Rules; clubs?: Record<string, StudentClubSummary[]>; logoDataUrl?: string | null; onProgress?: (done: number, total: number) => void;
 }): Promise<{ bytes: Uint8Array; filename: string; count: number }> {
-  const { school, period, closedMonths = [], summaries, comparison = [], data = [], rules, logoDataUrl = null, onProgress } = input;
+  const { school, period, closedMonths = [], summaries, comparison = [], data = [], rules, clubs = {}, logoDataUrl = null, onProgress } = input;
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
   const students = [...new Map(summaries.map((s) => [s.studentId, { id: s.studentId, name: s.studentName, code: s.studentCode, className: s.className }])).values()]
@@ -747,7 +786,7 @@ export async function buildClassReportsZip(input: {
     const comparable = comparison.filter((c) => c.studentId === student.id);
     const { doc, filename } = await buildStudentPdf({
       school, period, closedMonths, student, subjects, overall, comparable,
-      overallMonths: summarizeByMonth(studentRows, rules), raw: studentRows, rules, logoDataUrl,
+      overallMonths: summarizeByMonth(studentRows, rules), raw: studentRows, rules, clubs: clubs[student.id] ?? [], logoDataUrl,
     });
     zip.file(`${fileSafe(student.className)}/${filename}`, doc.output('arraybuffer'));
     done += 1;
@@ -771,6 +810,9 @@ export type ClubActivityRow = {
   punctuality: string | null; performance: string | null; participation: string | null; conduct: string | null; comment: string | null;
 };
 
+/** Club activities are recorded per month; rows saved before that still carry a full date. */
+const clubActivityMonth = (value: string) => monthLabel(String(value || '').slice(0, 7));
+
 /** Per-member club progress report: identity strip, KPI mix, activity table, comments, signatures. */
 export async function buildClubStudentReport(input: {
   school: string; club: { name: string; description?: string | null };
@@ -778,9 +820,9 @@ export async function buildClubStudentReport(input: {
   rows: ClubActivityRow[]; activitiesTotal?: number; logoDataUrl?: string | null;
 }): Promise<{ doc: Doc; filename: string }> {
   const { school, club, student, activitiesTotal, logoDataUrl = null } = input;
-  const rows = [...input.rows].sort((a, b) => a.activityDate.localeCompare(b.activityDate));
-  const from = rows[0]?.activityDate || '';
-  const to = rows[rows.length - 1]?.activityDate || '';
+  const rows = [...input.rows].sort((a, b) => a.activityDate.slice(0, 7).localeCompare(b.activityDate.slice(0, 7)));
+  const from = rows.length ? clubActivityMonth(rows[0].activityDate) : '';
+  const to = rows.length ? clubActivityMonth(rows[rows.length - 1].activityDate) : '';
   const periodText = from ? (from === to ? from : `${from} to ${to}`) : 'No activities recorded';
   const doc = await newDoc();
   const w = new PdfWriter(doc);
@@ -820,13 +862,13 @@ export async function buildClubStudentReport(input: {
     { label: 'Conduct', value: topValue(conduct), sub: countText(conduct), tone: toneFor(topValue(conduct)) },
   ]);
 
-  w.section('1. Activity record', 'One row per club activity for this student, with the observation made on the day.');
+  w.section('1. Activity record', 'One row per club activity for this student, with the month it was recorded in.');
   const font = 6.5;
   const pad = 2.5;
   const widths = fitWidths(w.content, [46, 96, 44, 58, 50, 54, 54, 113]);
-  w.table(['DATE', 'ACTIVITY', 'STATUS', 'PUNCTUALITY', 'PERF.', 'PARTICIPATION', 'CONDUCT', 'COMMENT'],
+  w.table(['MONTH', 'ACTIVITY', 'STATUS', 'PUNCTUALITY', 'PERF.', 'PARTICIPATION', 'CONDUCT', 'COMMENT'],
     rows.map((r) => [
-      w.clip(r.activityDate, font, widths[0] - pad * 2, 2),
+      w.clip(clubActivityMonth(r.activityDate), font, widths[0] - pad * 2, 2),
       w.clip(r.title, font, widths[1] - pad * 2, 3),
       w.clip(pretty(r.status), font, widths[2] - pad * 2, 2),
       w.clip(r.punctuality ? pretty(r.punctuality) : '—', font, widths[3] - pad * 2, 3),
@@ -839,7 +881,7 @@ export async function buildClubStudentReport(input: {
   const comments = rows.filter((r) => (r.comment || '').trim());
   w.section('2. Teacher comments', comments.length ? `${comments.length} entr${comments.length === 1 ? 'y' : 'ies'} carry a written comment.` : undefined);
   if (comments.length) {
-    comments.forEach((r) => w.bullet(`${r.activityDate} · ${r.title}: ${r.comment}`, { size: 8.5 }));
+    comments.forEach((r) => w.bullet(`${clubActivityMonth(r.activityDate)} · ${r.title}: ${r.comment}`, { size: 8.5 }));
   } else {
     w.text('No written comments were recorded for this period.', { size: 9, color: MUTED, gap: 6 });
   }
@@ -890,8 +932,10 @@ export async function buildClubReportsZip(input: {
     onProgress?.(done, roster.length);
   }
   const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
-  const dates = activities.map((a) => a.activityDate).sort();
-  const periodTag = dates.length ? `${dates[0]}_to_${dates[dates.length - 1]}` : todayKey();
+  const months = activities.map((a) => a.activityDate.slice(0, 7)).sort();
+  const periodTag = months.length
+    ? (months[0] === months[months.length - 1] ? months[0] : `${months[0]}_to_${months[months.length - 1]}`)
+    : todayKey().slice(0, 7);
   return { bytes, filename: `${fileSafe(school)}-${fileSafe(club.name)}-Club-Reports-${periodTag}.zip`, count: roster.length };
 }
 

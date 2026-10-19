@@ -1,5 +1,5 @@
 import { db } from '@/db';
-import { users, loginAttempts, organizations } from '@/db/schema';
+import { users, loginAttempts, organizations, sessions } from '@/db/schema';
 import { and, eq, like, or } from 'drizzle-orm';
 import { compare, hash } from 'bcryptjs';
 import { z } from 'zod';
@@ -34,10 +34,12 @@ async function logoFor(identity: string): Promise<string | null> {
 }
 
 export async function GET(req: Request) {
+ try {
   const identity = new URL(req.url).searchParams.get('identity');
   if (identity !== null) return Response.json({ logoUrl: await logoFor(identity) }, { headers: { 'Cache-Control': 'public, max-age=60' } });
   const user = await currentUser();
   return Response.json({user:user ? {id:user.id,name:user.name,username:user.username,role:user.role,organizationId:user.organizationId} : null});
+ } catch(e) { console.error('Auth lookup failed', e); return Response.json({error:'An unexpected error occurred.'},{status:500}); }
 }
 export async function POST(req: Request) {
  try {
@@ -58,6 +60,8 @@ export async function POST(req: Request) {
    const data=z.object({current:z.string(),password:passwordSchema}).parse(raw);
    if(!await compare(data.current,user.passwordHash)) throw new AppError('Current password is incorrect.',400);
    await db.update(users).set({passwordHash:await hash(data.password,8),updatedAt:new Date()}).where(eq(users.id,user.id));
+   // Changing a password ends every session for the account, not just this browser.
+   await db.delete(sessions).where(eq(sessions.userId,user.id));
    await audit(user.organizationId,user.id,'PASSWORD_CHANGE','user',user.id); await destroySession(); return Response.json({ok:true});
   }
   const data=z.object({identity:z.string().min(1).max(200),password:z.string().min(1)}).parse(raw);

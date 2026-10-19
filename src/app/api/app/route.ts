@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { AppError, audit, checkOrigin, orgFor, requireUser, schoolToday, dateMinus, teacherFor, validLessonDate, reportDatePolicy, reportWindowLabel, MIN_REPORT_WINDOW_DAYS, MAX_REPORT_WINDOW_DAYS } from '@/lib/security';
 import { saveMonthlyRecord } from '@/lib/lessons';
 import { loadSubjectRoster } from '@/lib/roster';
-import { groupReports, groupReportsByMonth } from '@/lib/reporting';
+import { groupReports, groupReportsByMonth, summarizeClubs, type StudentClubSummary } from '@/lib/reporting';
 import { resolvePeriod, monthStart, monthEnd, periodSlug, MONTH_PATTERN } from '@/lib/period';
 import { reviewTransition } from '@/lib/review';
 import { normalizeTeacherAssignmentImportRow, canonicalSubjectName, gradeNameForClass, placeholderTeacherEmail, subjectCodeFor, subjectKey, usernameFromName } from '@/lib/importing';
@@ -24,7 +24,7 @@ const rosterCountSql=(classCol:unknown,subjectCol:unknown)=>sql<number>`CAST((se
 export async function GET(req:Request){try{
  const user=await requireUser(); const url=new URL(req.url); const view=url.searchParams.get('view')||'overview';
  if(user.role==='SUPER_ADMIN'){
-  if(view==='audit')return Response.json({logs:await db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(100)});
+  if(view==='audit')return Response.json({logs:await db.select({id:auditLogs.id,organizationId:auditLogs.organizationId,userId:auditLogs.userId,username:users.username,name:users.name,action:auditLogs.action,entityType:auditLogs.entityType,entityId:auditLogs.entityId,metadata:auditLogs.metadata,createdAt:auditLogs.createdAt}).from(auditLogs).leftJoin(users,eq(users.id,auditLogs.userId)).orderBy(desc(auditLogs.createdAt)).limit(100)});
    if(view==='organizations'){const orgs=await db.select().from(organizations).orderBy(organizations.name); const totals=await Promise.all(orgs.map(async o=>({ ...o,studentCount:(await db.select({n:count()}).from(students).where(eq(students.organizationId,o.id)))[0].n,teacherCount:(await db.select({n:count()}).from(teachers).where(eq(teachers.organizationId,o.id)))[0].n,classCount:(await db.select({n:count()}).from(classes).where(eq(classes.organizationId,o.id)))[0].n,admin:o.primaryAdminUserId?(await db.select({id:users.id,name:users.name,username:users.username,email:users.email}).from(users).where(eq(users.id,o.primaryAdminUserId)).limit(1))[0]||null:null }))); return Response.json({organizations:totals});}
   if(view==='overview'){const today=new Date().toISOString().slice(0,10);return Response.json({role:user.role,name:user.name,organization:'Platform',today,windowDays:14,minDate:dateMinus(today,14),counts:{students:0,teachers:0,classes:0,subjects:0,totalReports:0},statusCounts:{},assignedClasses:[],assignedSubjects:[],assignments:[],recent:[],organizations:(await db.select({n:count()}).from(organizations))[0].n});}
    return Response.json({role:user.role,name:user.name,organizations:(await db.select({n:count()}).from(organizations))[0].n});
@@ -90,9 +90,10 @@ export async function GET(req:Request){try{
  }
  if(view==='students'){
   const classId=url.searchParams.get('classId');const search=(url.searchParams.get('search')||'').slice(0,80);const roster=url.searchParams.get('roster')==='1';
+  const sort=url.searchParams.get('sort')==='class'?'class':'name';
   const page=z.coerce.number().int().min(0).max(10000).parse(url.searchParams.get('page')||'0');
   if(teacher){if(!classId||!(await db.select({id:assignments.id}).from(assignments).where(and(myAssignment,eq(assignments.classId,classId))).limit(1)).length)throw new AppError('Class access denied.',403);}
-  const rows=await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,firstName:students.firstName,lastName:students.lastName,classId:students.classId,gradeId:students.gradeId,academicYearId:students.academicYearId,status:students.status,className:classes.name}).from(students).innerJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),classId?eq(students.classId,classId):undefined,teacher?eq(students.status,'ACTIVE'):undefined,search?or(like(students.fullName,`%${search}%`),like(students.studentId,`%${search}%`)):undefined)).orderBy(students.fullName,students.id).limit(roster?151:51).offset(roster?0:page*50);
+  const rows=await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,firstName:students.firstName,lastName:students.lastName,classId:students.classId,gradeId:students.gradeId,academicYearId:students.academicYearId,status:students.status,className:classes.name}).from(students).innerJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),classId?eq(students.classId,classId):undefined,teacher?eq(students.status,'ACTIVE'):undefined,search?or(like(students.fullName,`%${search}%`),like(students.studentId,`%${search}%`),like(classes.name,`%${search}%`)):undefined)).orderBy(sort==='class'?classes.name:students.fullName,students.fullName,students.id).limit(roster?151:51).offset(roster?0:page*50);
   if(roster&&rows.length>150)throw new AppError('Class roster exceeds the 150-student form limit. Contact your administrator.');
   return Response.json({students:roster?rows:rows.slice(0,50),page,hasMore:!roster&&rows.length>50});
  }
@@ -214,8 +215,27 @@ const lessonRecords = await db.select({
    }
    const data=[...legacyLessonData,...monthlyData].sort((a,b)=>a.studentName.localeCompare(b.studentName)||a.subjectName.localeCompare(b.subjectName)||a.lessonDate.localeCompare(b.lessonDate));
    if(data.length>20000) throw new AppError(`This period covers more than 20,000 observations. Shorten the date range or select a class or subject.`,413);
-   const closedMonths=(await db.select({month:monthClosures.month}).from(monthClosures).where(and(eq(monthClosures.organizationId,org.id),eq(monthClosures.closed,true),inArray(monthClosures.month,period.months)))).map(r=>r.month);
-   return Response.json({data,summaries:groupReports(data,rules),comparison:groupReportsByMonth(data,rules),rules,organization:org.name,period,closedMonths,coverage:{observations:data.length,lessonReports:new Set(data.map(r=>r.lessonId)).size,students:new Set(data.map(r=>r.studentId)).size}});
+    const closedMonths=(await db.select({month:monthClosures.month}).from(monthClosures).where(and(eq(monthClosures.organizationId,org.id),eq(monthClosures.closed,true),inArray(monthClosures.month,period.months)))).map(r=>r.month);
+    // §192 club memberships and activity records ride along so each child's main report carries the clubs they belong to.
+    const reportStudentIds=[...new Set(data.map(r=>r.studentId))];
+    let clubsByStudent:Record<string,StudentClubSummary[]>={};
+    if(reportStudentIds.length){
+      const memberRows=await db.select({studentId:clubMembers.studentId,clubId:clubMembers.clubId,clubName:clubs.name}).from(clubMembers).innerJoin(clubs,eq(clubs.id,clubMembers.clubId)).where(and(eq(clubs.organizationId,org.id),inArray(clubMembers.studentId,reportStudentIds))).limit(5000);
+      const clubIds=[...new Set(memberRows.map(m=>m.clubId))];
+      let activityRows:{id:string;clubId:string;activityDate:string;title:string}[]=[];
+      if(clubIds.length) activityRows=await db.select({id:clubActivities.id,clubId:clubActivities.clubId,activityDate:clubActivities.activityDate,title:clubActivities.title}).from(clubActivities).where(inArray(clubActivities.clubId,clubIds)).limit(5000);
+      const clubNameById=new Map(memberRows.map(m=>[m.clubId,m.clubName]));
+      let recordRows:{studentId:string;clubId:string;activityId:string;activityDate:string;title:string;performance:string|null;comment:string|null}[]=[];
+      if(activityRows.length){
+        recordRows=await db.select({studentId:clubActivityRecords.studentId,clubId:clubActivities.clubId,activityId:clubActivityRecords.clubActivityId,activityDate:clubActivities.activityDate,title:clubActivities.title,performance:clubActivityRecords.performance,comment:clubActivityRecords.comment}).from(clubActivityRecords).innerJoin(clubActivities,eq(clubActivities.id,clubActivityRecords.clubActivityId)).where(inArray(clubActivityRecords.clubActivityId,activityRows.map(a=>a.id))).limit(5000);
+      }
+      clubsByStudent=summarizeClubs(
+        memberRows.map(m=>({studentId:m.studentId,clubName:m.clubName})),
+        recordRows.map(r=>({studentId:r.studentId,clubName:clubNameById.get(r.clubId)||'',activityId:r.activityId,activityDate:r.activityDate,title:r.title,performance:r.performance,comment:r.comment})),
+        period.months
+      );
+    }
+    return Response.json({data,summaries:groupReports(data,rules),comparison:groupReportsByMonth(data,rules),rules,organization:org.name,period,closedMonths,clubs:clubsByStudent,coverage:{observations:data.length,lessonReports:new Set(data.map(r=>r.lessonId)).size,students:new Set(data.map(r=>r.studentId)).size}});
   }
   if(view==='dataQuality'){
    if(user.role!=='ADMIN') throw new AppError('Access denied.',403);
@@ -320,8 +340,13 @@ const lessonRecords = await db.select({
    const enrolled=enrolledRows.map(r=>r.studentId).filter(id=>activeIds.has(id));
    return Response.json({students:allStudents,enrolled,isDefault:enrolled.length===0,className:cls.name,subjectName:sub.name});
   }
-  if(view==='audit'){if(user.role!=='ADMIN') throw new AppError('Access denied.',403);return Response.json({logs:await db.select().from(auditLogs).where(eq(auditLogs.organizationId,org.id)).orderBy(desc(auditLogs.createdAt)).limit(100)});}
- if(view==='settings'){if(user.role!=='ADMIN') throw new AppError('Access denied.',403);return Response.json({settings:(await db.select().from(settings).where(eq(settings.organizationId,org.id)))[0],closures:await db.select().from(monthClosures).where(eq(monthClosures.organizationId,org.id)),organization:org});}
+  if(view==='audit'){if(user.role!=='ADMIN') throw new AppError('Access denied.',403);return Response.json({logs:await db.select({id:auditLogs.id,organizationId:auditLogs.organizationId,userId:auditLogs.userId,username:users.username,name:users.name,action:auditLogs.action,entityType:auditLogs.entityType,entityId:auditLogs.entityId,metadata:auditLogs.metadata,createdAt:auditLogs.createdAt}).from(auditLogs).leftJoin(users,eq(users.id,auditLogs.userId)).where(eq(auditLogs.organizationId,org.id)).orderBy(desc(auditLogs.createdAt)).limit(100)});}
+ if(view==='settings'){if(user.role!=='ADMIN') throw new AppError('Access denied.',403);
+  // A freshly provisioned organization can miss its settings row; create it with schema
+  // defaults rather than handing the settings screen an undefined object.
+  let [cfg]=await db.select().from(settings).where(eq(settings.organizationId,org.id));
+  if(!cfg){await db.insert(settings).values({organizationId:org.id}).onConflictDoNothing();cfg=(await db.select().from(settings).where(eq(settings.organizationId,org.id)))[0];}
+  return Response.json({settings:cfg,closures:await db.select().from(monthClosures).where(eq(monthClosures.organizationId,org.id)),organization:org});}
  if(view==='clubs'){
   const allClubs=await db.select().from(clubs).where(eq(clubs.organizationId,org.id)).orderBy(clubs.name);
   const assigned=teacher?(await db.select({clubId:clubTeachers.clubId}).from(clubTeachers).where(eq(clubTeachers.teacherId,teacher.id))).map(r=>r.clubId):null;
@@ -353,8 +378,9 @@ const lessonRecords = await db.select({
 export async function POST(req:Request){try{
  await checkOrigin(req); const user=await requireUser(); const raw=await req.json(); const action=str(raw.action);
    if(action==='saveMonthlyRecord') return Response.json({lesson:await saveMonthlyRecord(user,raw.data)});
-  if(action==='deleteDraft'){
-    const x=z.object({id:z.string().uuid()}).parse(raw.data);
+   if(action==='deleteDraft'){
+     if(!['ADMIN','TEACHER'].includes(user.role))throw new AppError('Administrator or teacher access required.',403);
+     const x=z.object({id:z.string().uuid()}).parse(raw.data);
     const org=await orgFor(user),teacher=user.role==='TEACHER'?await teacherFor(user):null;
     const [draft]=await db.select({id:lessons.id}).from(lessons).where(and(eq(lessons.id,x.id),eq(lessons.organizationId,org.id),teacher?eq(lessons.teacherId,teacher.id):undefined,eq(lessons.status,'DRAFT')));
     if(draft){
@@ -474,10 +500,15 @@ export async function POST(req:Request){try{
    await audit(org.id,user.id,'BEHAVIOUR_OBSERVATION_CREATED','behaviour_observation',result.id,{studentId:x.studentId,category:x.category});return Response.json({ok:true,id:result.id});
  }
  if(action==='resolveFollowUp'){
+   if(!['ADMIN','TEACHER'].includes(user.role))throw new AppError('Administrator or teacher access required.',403);
    const org=await orgFor(user);
+   const teacher=user.role==='TEACHER'?await teacherFor(user):null;
+   if(user.role==='TEACHER'&&!teacher)throw new AppError('No teacher reference available.',400);
    const x=z.object({id:z.string().uuid(),resolved:z.boolean()}).parse(raw.data);
    const [obs]=await db.select().from(behaviourObservations).where(and(eq(behaviourObservations.id,x.id),eq(behaviourObservations.organizationId,org.id)));
    if(!obs)throw new AppError('Observation not found.',404);
+   // Teachers only ever see their own rows in the log, so they may only resolve those.
+   if(teacher&&obs.teacherId!==teacher.id)throw new AppError('You can only resolve follow-ups on your own observations.',403);
    await db.update(behaviourObservations).set({followUpRequired:!x.resolved,updatedAt:new Date()}).where(and(eq(behaviourObservations.id,x.id),eq(behaviourObservations.organizationId,org.id)));
    await audit(org.id,user.id,'BEHAVIOUR_FOLLOW_UP_RESOLVED','behaviour_observation',x.id,{resolved:x.resolved});
    return Response.json({ok:true});
@@ -547,7 +578,7 @@ export async function POST(req:Request){try{
    return Response.json({ok:true,count:ids.length});
   }
   if(action==='saveClubActivity'){
-   const x=z.object({id:z.string().uuid().optional(),clubId:z.string().uuid(),title:z.string().trim().min(2).max(120),activityDate:z.iso.date(),description:z.string().max(2000).optional(),records:z.array(z.object({studentId:z.string().uuid(),punctuality:z.string().max(40).nullable().optional(),performance:z.string().max(40).nullable().optional(),participation:z.string().max(40).nullable().optional(),conduct:z.string().max(40).nullable().optional(),comment:z.string().max(1000).optional()})).max(300).optional()}).parse(raw.data);
+   const x=z.object({id:z.string().uuid().optional(),clubId:z.string().uuid(),title:z.string().trim().min(2).max(120),activityDate:z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])(?:-\d{2})?$/,'Activity month must look like 2026-10.'),description:z.string().max(2000).optional(),records:z.array(z.object({studentId:z.string().uuid(),punctuality:z.string().max(40).nullable().optional(),performance:z.string().max(40).nullable().optional(),participation:z.string().max(40).nullable().optional(),conduct:z.string().max(40).nullable().optional(),comment:z.string().max(1000).optional()})).max(300).optional()}).parse(raw.data);
    const club=await loadClub(x.clubId);
    if(!await canManageClub(club.id))throw new AppError('You can only record activities for your own clubs.',403);
    if(club.active===false)throw new AppError('This club is inactive.',409);
@@ -567,12 +598,12 @@ export async function POST(req:Request){try{
     if(old.clubId!==club.id)throw new AppError('That activity belongs to another club.',409);
     if(!['DRAFT','RETURNED'].includes(old.status))throw new AppError('Only draft or returned activities can be edited.',409);
     const reopened=old.status==='RETURNED';
-    const changed=await db.update(clubActivities).set({title:x.title,activityDate:x.activityDate,description:x.description?.trim()||'',updatedAt:new Date(),...(reopened?{status:'DRAFT',submittedAt:null,reviewComment:null,reviewedAt:null,reviewedBy:null}:{})}).where(and(eq(clubActivities.id,old.id),eq(clubActivities.status,old.status))).returning({id:clubActivities.id});
+    const changed=await db.update(clubActivities).set({title:x.title,activityDate:x.activityDate.slice(0,7),description:x.description?.trim()||'',updatedAt:new Date(),...(reopened?{status:'DRAFT',submittedAt:null,reviewComment:null,reviewedAt:null,reviewedBy:null}:{})}).where(and(eq(clubActivities.id,old.id),eq(clubActivities.status,old.status))).returning({id:clubActivities.id});
     if(!changed.length)throw new AppError('This activity changed while you were editing it. Reload and try again.',409);
     activityId=old.id;status=reopened?'DRAFT':old.status;
     await audit(oid,user.id,reopened?'CLUB_ACTIVITY_RESUBMITTED_DRAFT':'CLUB_ACTIVITY_UPDATED','club_activity',old.id);
    }else{
-    const [created]=await db.insert(clubActivities).values({organizationId:oid,clubId:club.id,title:x.title,activityDate:x.activityDate,description:x.description?.trim()||'',status:'DRAFT',createdBy:user.id}).returning();
+    const [created]=await db.insert(clubActivities).values({organizationId:oid,clubId:club.id,title:x.title,activityDate:x.activityDate.slice(0,7),description:x.description?.trim()||'',status:'DRAFT',createdBy:user.id}).returning();
     activityId=created.id;
     await audit(oid,user.id,'CLUB_ACTIVITY_CREATED','club_activity',created.id,{clubName:club.name});
    }
@@ -626,7 +657,7 @@ export async function POST(req:Request){try{
     const data=z.object({name:z.string().min(2),code:z.string().min(2).max(25),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),domain:z.string().max(200).optional().nullable(),logoUrl:logoUrlSchema.optional().nullable(),id:z.string().optional(),active:z.boolean().optional()}).parse(raw.data);
    const [org]=data.id?await db.update(organizations).set({name:data.name,code:data.code.toUpperCase(),timezone:data.timezone,domain:data.domain||null,logoUrl:data.logoUrl||null,active:data.active??true,updatedAt:new Date()}).where(eq(organizations.id,data.id)).returning():await db.insert(organizations).values({name:data.name,code:data.code.toUpperCase(),timezone:data.timezone,domain:data.domain||null,logoUrl:data.logoUrl||null}).returning();
    if(!org) throw new AppError('Organization not found.',404);
-   if(!data.id){await db.insert(settings).values({organizationId:org.id}); await db.insert(grades).values(Array.from({length:13},(_,i)=>({organizationId:org.id,name:`Grade ${i+1}`,orderIndex:i+1})));}
+   if(!data.id){await db.insert(settings).values({organizationId:org.id}); await db.insert(grades).values(Array.from({length:13},(_,i)=>({organizationId:org.id,name:`Year ${i+1}`,orderIndex:i+1})));}
    await audit(null,user.id,data.id?'ORGANIZATION_UPDATED':'ORGANIZATION_CREATED','organization',org.id);return Response.json({ok:true});
   }
    if(action==='updateAdmin'){
@@ -730,7 +761,7 @@ export async function POST(req:Request){try{
    for(let i=0;i<input.rows.length;i++)try{
    const row=input.rows[i];
     if(input.kind==='students'){
-     const code=clean(row['Student ID']);const name=clean(row['Student Name']);const gradeName=clean(row['Grade']);const className=clean(row['Class']);const yearName=clean(row['Academic Year']);const statusRaw=clean(row['Status']).toUpperCase();
+     const code=clean(row['Student ID']);const name=clean(row['Student Name']);const gradeName=clean(row['Year']||row['Grade']);const className=clean(row['Class']);const yearName=clean(row['Academic Year']);const statusRaw=clean(row['Status']).toUpperCase();
      if(!code||!name||!className||(statusRaw&&!['ACTIVE','INACTIVE'].includes(statusRaw)))throw Error('Invalid student ID, name or class.');
      const y=yearName?await ensureYear(yearName):activeYear();if(!y)throw Error('Create an academic year before importing students.');
      // The stored class is the source of truth for the grade so the two can never disagree.
@@ -822,7 +853,12 @@ if(displaced.length){await db.update(assignments).set({active:false,updatedAt:ne
   const d=raw.data; const id=z.string().uuid().parse(d.id); let reassignedFrom:string[]=[];
   if(type==='student'){
     const x=z.object({firstName:z.string().min(1),lastName:z.string().min(1),studentId:z.string().min(1),gradeId:z.string(),classId:z.string(),academicYearId:z.string(),status:z.enum(['ACTIVE','INACTIVE'])}).parse(d);
-    await db.update(students).set({...x,fullName:`${x.firstName} ${x.lastName}`,updatedAt:new Date()}).where(and(eq(students.id,id),eq(students.organizationId,oid)));
+    // Mirror the create path: the class must belong to this organization and to the
+    // submitted year/level, otherwise a crafted request could re-parent a student.
+    const [cl]=await db.select().from(classes).where(and(eq(classes.id,x.classId),eq(classes.organizationId,oid),eq(classes.gradeId,x.gradeId),eq(classes.academicYearId,x.academicYearId)));
+    if(!cl)throw new AppError('Invalid class, grade or year.');
+    const [updated]=await db.update(students).set({...x,fullName:`${x.firstName} ${x.lastName}`,updatedAt:new Date()}).where(and(eq(students.id,id),eq(students.organizationId,oid))).returning({id:students.id});
+    if(!updated)throw new AppError('Student not found.',404);
   }
   if(type==='teacher'){
     const x=z.object({name:z.string().min(2),email:z.email(),username:z.string().max(60).optional(),active:z.boolean()}).parse(d);
@@ -869,38 +905,55 @@ if(displaced.length){await db.update(assignments).set({active:false,updatedAt:ne
     const next={teacherId:x.teacherId??current.teacherId,classId:x.classId??current.classId,subjectId:x.subjectId??current.subjectId,academicYearId:x.academicYearId??current.academicYearId,active:x.active??current.active};
     const [[t],[c],[s],[y]]=await Promise.all([db.select().from(teachers).where(and(eq(teachers.id,next.teacherId),eq(teachers.organizationId,oid))).limit(1),db.select().from(classes).where(and(eq(classes.id,next.classId),eq(classes.organizationId,oid))).limit(1),db.select().from(subjects).where(and(eq(subjects.id,next.subjectId),eq(subjects.organizationId,oid))).limit(1),db.select().from(academicYears).where(and(eq(academicYears.id,next.academicYearId),eq(academicYears.organizationId,oid))).limit(1)]);
     if(!t)throw new AppError('Teacher not found.');if(!y)throw new AppError('Academic year not found.');if(!c)throw new AppError('Class not found.');if(c.academicYearId!==y.id)throw new AppError('That class belongs to a different academic year.');if(!s)throw new AppError('Subject not found.');
-    const clashes=await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,next.teacherId),eq(assignments.classId,next.classId),eq(assignments.subjectId,next.subjectId),eq(assignments.academicYearId,next.academicYearId)));
-    if(clashes.some(a=>a.id!==id))throw new AppError('Another assignment already uses this teacher, class, subject and year.');
-    await db.update(assignments).set({...next,updatedAt:new Date()}).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
+    const tupleChanged=next.teacherId!==current.teacherId||next.classId!==current.classId||next.subjectId!==current.subjectId||next.academicYearId!==current.academicYearId;
+    if(tupleChanged){
+      const [oldHolder]=await db.select({name:teachers.name}).from(teachers).where(eq(teachers.id,current.teacherId)).limit(1);
+      await db.update(assignments).set({active:false,updatedAt:new Date()}).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
+      if(current.active&&oldHolder&&current.teacherId!==next.teacherId)reassignedFrom.push(oldHolder.name);
+      await audit(oid,user.id,'ASSIGNMENT_DEACTIVATED','assignment',id,{reassignedTo:t.name});
+      const [existing]=await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,next.teacherId),eq(assignments.classId,next.classId),eq(assignments.subjectId,next.subjectId),eq(assignments.academicYearId,next.academicYearId)));
+      if(existing){await db.update(assignments).set({active:next.active,updatedAt:new Date()}).where(eq(assignments.id,existing.id));}
+      else{await db.insert(assignments).values({organizationId:oid,teacherId:next.teacherId,classId:next.classId,subjectId:next.subjectId,academicYearId:next.academicYearId,active:next.active});}
+    }else{
+      await db.update(assignments).set({active:next.active,updatedAt:new Date()}).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
+    }
     if(next.active){
       const displaced=await db.select({id:assignments.id,teacherName:teachers.name}).from(assignments).innerJoin(teachers,eq(teachers.id,assignments.teacherId)).where(and(eq(assignments.organizationId,oid),eq(assignments.classId,next.classId),eq(assignments.subjectId,next.subjectId),eq(assignments.academicYearId,next.academicYearId),not(eq(assignments.teacherId,next.teacherId)),eq(assignments.active,true)));
-      if(displaced.length){await db.update(assignments).set({active:false,updatedAt:new Date()}).where(inArray(assignments.id,displaced.map(r=>r.id)));reassignedFrom=[...new Set(displaced.map(r=>r.teacherName))];for(const row of displaced)await audit(oid,user.id,'ASSIGNMENT_DEACTIVATED','assignment',row.id,{reassignedTo:t.name});}
+      if(displaced.length){await db.update(assignments).set({active:false,updatedAt:new Date()}).where(inArray(assignments.id,displaced.map(r=>r.id)));reassignedFrom=[...new Set([...reassignedFrom,...displaced.map(r=>r.teacherName)])];for(const row of displaced)await audit(oid,user.id,'ASSIGNMENT_DEACTIVATED','assignment',row.id,{reassignedTo:t.name});}
     }
   }
   await audit(oid,user.id,`${type.toUpperCase()}_UPDATED`,type,id);
   return Response.json({ok:true,...(reassignedFrom.length?{reassignedFrom}:{})});
- }
- if(action==='deleteEntity'){
-  const type=z.enum(['assignment','term','grade','class','subject','student','club']).parse(raw.type);
-  const id=z.string().uuid().parse(raw.id);
-  if(type==='assignment'){
-    await db.delete(assignments).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
-  } else if(type==='student'){
-    await db.update(students).set({status:'INACTIVE',updatedAt:new Date()}).where(and(eq(students.id,id),eq(students.organizationId,oid)));
-  } else if(type==='class'){
-    await db.update(classes).set({active:false,updatedAt:new Date()}).where(and(eq(classes.id,id),eq(classes.organizationId,oid)));
-  } else if(type==='subject'){
-    await db.update(subjects).set({active:false,updatedAt:new Date()}).where(and(eq(subjects.id,id),eq(subjects.organizationId,oid)));
-   } else if(type==='club'){
-    await db.update(clubs).set({active:false,updatedAt:new Date()}).where(and(eq(clubs.id,id),eq(clubs.organizationId,oid)));
-   } else if(type==='term'){
-    await db.update(terms).set({active:false}).where(and(eq(terms.id,id),eq(terms.organizationId,oid)));
-   } else if(type==='grade'){
-    await db.update(grades).set({active:false}).where(and(eq(grades.id,id),eq(grades.organizationId,oid)));
+}
+   if(action==='deleteEntity'){
+    const type=z.enum(['assignment','term','grade','class','subject','student','club']).parse(raw.type);
+    const id=z.string().uuid().parse(raw.id);
+    let metadata:Record<string,unknown>|undefined;
+    let removed=false;
+    if(type==='assignment'){
+      const [a]=await db.select({teacherId:assignments.teacherId,classId:assignments.classId,subjectId:assignments.subjectId,academicYearId:assignments.academicYearId}).from(assignments).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid))).limit(1);
+      if(!a)throw new AppError('Assignment not found.',404);
+      metadata={teacherId:a.teacherId,classId:a.classId,subjectId:a.subjectId,academicYearId:a.academicYearId};
+      await db.delete(assignments).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
+      removed=true;
+    } else if(type==='student'){
+      removed=!!(await db.update(students).set({status:'INACTIVE',updatedAt:new Date()}).where(and(eq(students.id,id),eq(students.organizationId,oid))).returning({id:students.id})).length;
+    } else if(type==='class'){
+      removed=!!(await db.update(classes).set({active:false,updatedAt:new Date()}).where(and(eq(classes.id,id),eq(classes.organizationId,oid))).returning({id:classes.id})).length;
+    } else if(type==='subject'){
+      removed=!!(await db.update(subjects).set({active:false,updatedAt:new Date()}).where(and(eq(subjects.id,id),eq(subjects.organizationId,oid))).returning({id:subjects.id})).length;
+     } else if(type==='club'){
+      removed=!!(await db.update(clubs).set({active:false,updatedAt:new Date()}).where(and(eq(clubs.id,id),eq(clubs.organizationId,oid))).returning({id:clubs.id})).length;
+     } else if(type==='term'){
+      removed=!!(await db.update(terms).set({active:false}).where(and(eq(terms.id,id),eq(terms.organizationId,oid))).returning({id:terms.id})).length;
+     } else if(type==='grade'){
+      removed=!!(await db.update(grades).set({active:false}).where(and(eq(grades.id,id),eq(grades.organizationId,oid))).returning({id:grades.id})).length;
+     }
+    // A row in another organization (or one that never existed) must not read as success.
+    if(!removed)throw new AppError('Record not found.',404);
+    await audit(oid,user.id,`${type.toUpperCase()}_DEACTIVATED`,type,id,metadata);
+    return Response.json({ok:true});
    }
-  await audit(oid,user.id,`${type.toUpperCase()}_DEACTIVATED`,type,id);
-  return Response.json({ok:true});
- }
  if(action==='review'){
    const x=z.object({id:z.string(),status:z.enum(['UNDER_REVIEW','APPROVED','RETURNED','SUBMITTED']),comment:z.string().max(1000).optional()}).parse(raw.data);
    const [old]=await db.select().from(lessons).where(and(eq(lessons.id,x.id),eq(lessons.organizationId,oid)));
@@ -917,7 +970,10 @@ if(displaced.length){await db.update(assignments).set({active:false,updatedAt:ne
   if(action==='settings'){
    const x=z.object({name:z.string().min(2).optional(),logoUrl:logoUrlSchema.optional().nullable(),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),excellentThreshold:z.coerce.number().min(1).max(3),goodThreshold:z.coerce.number().min(1).max(3),homeworkUsuallyThreshold:z.coerce.number().min(0).max(1),punctualityOccasionallyMax:z.coerce.number().min(0).max(1)}).parse(raw.data);
    await db.update(organizations).set({name:x.name||org.name,logoUrl:x.logoUrl!==undefined?x.logoUrl:org.logoUrl,timezone:x.timezone,updatedAt:new Date()}).where(eq(organizations.id,oid));
-    await db.update(settings).set({excellentThreshold:x.excellentThreshold,goodThreshold:x.goodThreshold,homeworkUsuallyThreshold:x.homeworkUsuallyThreshold,punctualityOccasionallyMax:x.punctualityOccasionallyMax,version:(await db.select().from(settings).where(eq(settings.organizationId,oid)))[0].version+1,updatedAt:new Date()}).where(eq(settings.organizationId,oid));
+   await db.insert(settings).values({organizationId:oid}).onConflictDoNothing();
+   const [cfg]=await db.select().from(settings).where(eq(settings.organizationId,oid));
+   if(!cfg)throw new AppError('Reporting settings are unavailable.');
+    await db.update(settings).set({excellentThreshold:x.excellentThreshold,goodThreshold:x.goodThreshold,homeworkUsuallyThreshold:x.homeworkUsuallyThreshold,punctualityOccasionallyMax:x.punctualityOccasionallyMax,version:cfg.version+1,updatedAt:new Date()}).where(eq(settings.organizationId,oid));
    await audit(oid,user.id,'CONFIGURATION_CHANGED','settings',oid);
    return Response.json({ok:true});
   }

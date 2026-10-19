@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validLessonDate, dateMinus } from '../src/lib/security';
-import { summarize, groupReports, groupReportsByMonth, summarizeByMonth, resultTrend, calculateStudentTrends, buildNormalRecordDefaults, buildReportActivitySeries, type Observation } from '../src/lib/reporting';
+import { summarize, groupReports, groupReportsByMonth, summarizeByMonth, resultTrend, calculateStudentTrends, buildNormalRecordDefaults, buildReportActivitySeries, summarizeClubs, type Observation } from '../src/lib/reporting';
 import { reviewTransition } from '../src/lib/review';
 import { normalizeTeacherAssignmentImportRow, buildStudentImportRows, buildTeacherImportRows, gradeNameForClass, academicYearFromFileName, canonicalSubjectName, subjectKey, subjectCodeFor, placeholderTeacherEmail, parseCsvTable, safeCsvCell } from '../src/lib/importing';
 import {
@@ -52,10 +52,10 @@ test('§import: teacher roster row with NO, NAME, SURNAME, EMAIL, SUBJECTS and C
   });
 });
 
-test('§import: grade and academic year are derived from the class name and file name', () => {
-  assert.equal(gradeNameForClass('7A'), 'Grade 7');
-  assert.equal(gradeNameForClass('9B'), 'Grade 9');
-  assert.equal(gradeNameForClass('10'), 'Grade 10');
+test('§import: year level and academic year are derived from the class name and file name', () => {
+  assert.equal(gradeNameForClass('7A'), 'Year 7');
+  assert.equal(gradeNameForClass('9B'), 'Year 9');
+  assert.equal(gradeNameForClass('10'), 'Year 10');
   assert.equal(gradeNameForClass('MP1'), 'MP');
   assert.equal(gradeNameForClass('MP3'), 'MP');
   assert.equal(academicYearFromFileName('List of students 2026-2027.xlsx'), '2026-2027');
@@ -84,12 +84,12 @@ test('§import: student workbook rows are read from every sheet, including side-
 
   const parsed = buildStudentImportRows(sheets, '2026-2027');
   assert.equal(parsed.rows.length, 4);
-  assert.deepEqual(parsed.headers, ['Student ID', 'Student Name', 'Grade', 'Class', 'Academic Year', 'Status']);
+  assert.deepEqual(parsed.headers, ['Student ID', 'Student Name', 'Year', 'Class', 'Academic Year', 'Status']);
   assert.deepEqual(parsed.rows.map((r) => r['Student ID']), ['2026-2027-MP1-1', '2026-2027-MP1-2', '2026-2027-7A-1', '2026-2027-7B-16']);
   assert.equal(parsed.rows[0]['Student Name'], 'Mayanja Promise Kirster');
-  assert.equal(parsed.rows[0]['Grade'], 'MP');
+  assert.equal(parsed.rows[0]['Year'], 'MP');
   assert.equal(parsed.rows[0]['Status'], '', 'no Status column means the row keeps its current status');
-  assert.equal(parsed.rows[2]['Grade'], 'Grade 7');
+  assert.equal(parsed.rows[2]['Year'], 'Year 7');
   assert.equal(parsed.rows[2]['Class'], '7A');
   assert.equal(parsed.rows[3]['Class'], '7B');
   assert.equal(parsed.rows[3]['Academic Year'], '2026-2027');
@@ -861,6 +861,22 @@ test('§168: Needs improvement observations mandate documentation in observation
   assert.equal(result.observations[0].subject, 'Mathematics');
 });
 
+test('§168: one written comment per subject, never a default needs-improvement filler', () => {
+  const rows: Observation[] = [
+    { ...comparisonBase, lessonId: 'ni-1', lessonDate: '2026-09-01', comment: 'needs improvement on performance' },
+    { ...comparisonBase, lessonId: 'ni-2', lessonDate: '2026-09-02', comment: null },
+    { ...comparisonBase, lessonId: 'ni-3', lessonDate: '2026-09-03', comment: null, performance: 'GOOD' },
+    { ...comparisonBase, lessonId: 'ni-4', lessonDate: '2026-09-01', subjectName: 'Physics', comment: null },
+    { ...comparisonBase, lessonId: 'ni-5', lessonDate: '2026-09-04', subjectName: 'Physics', comment: null, performance: 'GOOD' },
+  ];
+
+  const result = summarize(rows, undefined);
+  assert.deepEqual(result.observations, [
+    { date: '2026-09-01', comment: 'needs improvement on performance', subject: 'Mathematics' },
+  ]);
+  assert.ok(result.observations.every((o) => !/needs improvement observation/i.test(o.comment)), 'a flagged row without a comment must not invent one');
+});
+
 
 // §153: Demo Assignment Segregation Test for John & Sarah
 test('§153: Demo Assignment Segregation for multiple teachers (John & Sarah)', () => {
@@ -1037,4 +1053,32 @@ test('§168: API Manipulation Security validates student roster integrity and pr
     () => validateSubmissionPayload(true, 'Algebra', roster, [...validRecords.slice(0, 2), { studentId: 's-injected', attendance: 'PRESENT' }]),
     /Unauthorized student ID/
   );
+});
+
+test('§192: summarizeClubs gives each child one short summary per club they belong to', () => {
+  const memberships = [
+    { studentId: 's1', clubName: 'Robotics Club' },
+    { studentId: 's1', clubName: 'Debate Club' },
+    { studentId: 's2', clubName: 'Robotics Club' },
+  ];
+  const records = [
+    { studentId: 's1', clubName: 'Robotics Club', activityId: 'a1', activityDate: '2026-09', title: 'Line-following robots', performance: 'GOOD', comment: 'Good teamwork' },
+    { studentId: 's1', clubName: 'Robotics Club', activityId: 'a2', activityDate: '2026-10', title: 'Debate practice', performance: 'NEEDS_IMPROVEMENT', comment: 'Needs to focus' },
+    { studentId: 's2', clubName: 'Robotics Club', activityId: 'a1', activityDate: '2026-09', title: 'Line-following robots', performance: 'EXCELLENT', comment: null },
+    // A record for a club the child does not belong to must never surface.
+    { studentId: 's2', clubName: 'Debate Club', activityId: 'a3', activityDate: '2026-09', title: 'Oratory', performance: 'GOOD', comment: 'ghost' },
+  ];
+  const byPeriod = summarizeClubs(memberships, records, ['2026-09']);
+  assert.deepEqual(byPeriod.s1.map((c) => c.clubName), ['Debate Club', 'Robotics Club'], 'one summary per club membership, sorted by name');
+  assert.equal(byPeriod.s1[0].activities, 0, 'a club with no activity in the period counts zero');
+  assert.equal(byPeriod.s1[1].activities, 1, 'only activities inside the period month window are counted');
+  assert.deepEqual(byPeriod.s1[1].months, ['2026-09']);
+  assert.equal(byPeriod.s1[1].latest?.title, 'Line-following robots');
+  assert.deepEqual(byPeriod.s2.map((c) => c.clubName), ['Robotics Club'], 'a record in a club the child does not join is dropped');
+  assert.equal(byPeriod.s2[0].activities, 1);
+  assert.equal(byPeriod.s2[0].latest?.comment, null, 'a missing comment stays null instead of being invented');
+
+  const allMonths = summarizeClubs(memberships, records, []);
+  assert.equal(allMonths.s1.find((c) => c.clubName === 'Robotics Club')?.activities, 2, 'an empty month window counts every activity');
+  assert.equal(allMonths.s1.find((c) => c.clubName === 'Robotics Club')?.latest?.title, 'Debate practice', 'the latest activity wins by month, not by insertion order');
 });

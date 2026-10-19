@@ -10,6 +10,20 @@ export function buildNormalRecordDefaults(): NormalRecord { return { attendance:
 // categories (absence included), so a mostly-late month can never headline "Always On
 // Time"; legacy dated records keep the §48 late-rate derivation below.
 const monthlyPunctualityResult=(rows:Observation[]):string|null=>{if(!rows.some(r=>r.source==='monthly'))return null;const counts=tally(rows.filter(r=>r.source==='monthly').map(r=>r.punctuality));return punctualityResultFromTally(counts);};
+// §35/§51/§168: a comment is mandatory whenever performance or conduct needs improvement,
+// so the report only lists what the teacher actually wrote — one general comment per subject,
+// covering every field flagged in it, and never a default filler comment.
+const observationsFor=(rows:Observation[])=>{
+  const out:{date:string;comment:string;subject:string}[]=[];const seen=new Set<string>();
+  for(const r of rows){
+    const text=(r.comment||'').trim();
+    if(!text||seen.has(r.subjectName))continue;
+    seen.add(r.subjectName);
+    out.push({date:r.lessonDate,comment:text,subject:r.subjectName});
+    if(out.length===12)break;
+  }
+  return out;
+};
 export function buildReportActivitySeries(rows: Observation[]) {
   const buckets = new Map<string, { date: string; submitted: number; approved: number; returned: number; total: number }>();
   rows.forEach((row) => {
@@ -31,7 +45,7 @@ export function summarize(rows:Observation[],rules:Rules){
  const hwRate=hwTotal?((homework.ALWAYS_COMPLETED||0)+(homework.USUALLY_COMPLETED||0))/hwTotal:null;
  const puncTotal=(punctuality.ALWAYS_ON_TIME||0)+(punctuality.OCCASIONALLY_LATE||0)+(punctuality.FREQUENTLY_LATE||0);
  const latePunc=puncTotal?((punctuality.OCCASIONALLY_LATE||0)+(punctuality.FREQUENTLY_LATE||0))/puncTotal:null;
- return {lessons:new Set(rows.map(r=>r.lessonId)).size,attendance,performance,participation,homework,conduct,punctuality,attendanceRate:total?Math.round(attended/total*100):null,performanceResult:scored(performance,'EXCELLENT','GOOD','NEEDS_IMPROVEMENT',rules),participationResult:scored(participation,'ACTIVE','MODERATE','PASSIVE',rules),conductResult:scored(conduct,'EXCELLENT','GOOD','NEEDS_IMPROVEMENT',rules),homeworkResult:hwRate===null?'No data':hwRate===1?'Always Completed':hwRate>=(rules?.homeworkUsuallyThreshold??0.8)?'Usually Completed':'Rarely Completed',punctualityResult:monthlyPunctualityResult(rows)??(latePunc===null?'No data':latePunc===0?'Always On Time':latePunc<=(rules?.punctualityOccasionallyMax??0.1)?'Occasionally Late':'Frequently Late'), topics:[...new Set(rows.map(r=>r.topic.trim()).filter(Boolean))],observations:(()=>{const seen=new Set<string>();return rows.filter(r=>r.comment || r.performance==='NEEDS_IMPROVEMENT' || r.conduct==='NEEDS_IMPROVEMENT').filter(r=>{const text=r.comment||'Needs improvement observation';const key=`${r.subjectName}|${text}`;if(seen.has(key))return false;seen.add(key);return true;}).map(r=>({date:r.lessonDate,comment:r.comment||'Needs improvement observation',subject:r.subjectName})).slice(0,12);})(),version:rules?.version??1};
+ return {lessons:new Set(rows.map(r=>r.lessonId)).size,attendance,performance,participation,homework,conduct,punctuality,attendanceRate:total?Math.round(attended/total*100):null,performanceResult:scored(performance,'EXCELLENT','GOOD','NEEDS_IMPROVEMENT',rules),participationResult:scored(participation,'ACTIVE','MODERATE','PASSIVE',rules),conductResult:scored(conduct,'EXCELLENT','GOOD','NEEDS_IMPROVEMENT',rules),homeworkResult:hwRate===null?'No data':hwRate===1?'Always Completed':hwRate>=(rules?.homeworkUsuallyThreshold??0.8)?'Usually Completed':'Rarely Completed',punctualityResult:monthlyPunctualityResult(rows)??(latePunc===null?'No data':latePunc===0?'Always On Time':latePunc<=(rules?.punctualityOccasionallyMax??0.1)?'Occasionally Late':'Frequently Late'), topics:[...new Set(rows.map(r=>r.topic.trim()).filter(Boolean))],observations:observationsFor(rows),version:rules?.version??1};
 }
 export function groupReports(rows:Observation[],rules:Rules){const groups=new Map<string,Observation[]>();for(const row of rows){const key=`${row.studentId}|${row.subjectName}`;groups.set(key,[...(groups.get(key)||[]),row]);}return [...groups.values()].map(g=>({studentId:g[0].studentId,studentName:g[0].studentName,studentCode:g[0].studentCode,className:g[0].className,subjectName:g[0].subjectName,teacherName:g[0].teacherName,...summarize(g,rules)}));}
 export type SubjectMonthSummary={month:string;lessons:number;attendance:Record<string,number>;performance:Record<string,number>;participation:Record<string,number>;homework:Record<string,number>;conduct:Record<string,number>;punctuality:Record<string,number>;attendanceRate:number|null;performanceResult:string;participationResult:string;homeworkResult:string;conductResult:string;punctualityResult:string;topics:string[];observations:{date:string;comment:string;subject:string}[];version:number};
@@ -41,3 +55,31 @@ export function groupReportsByMonth(rows:Observation[],rules:Rules):SubjectCompa
 export const RESULT_RANK:Record<string,number>={EXCELLENT:3,ACTIVE:3,GOOD:2,MODERATE:2,'Always Completed':2,'Always On Time':2,'Usually On Time':2,'NEEDS_IMPROVEMENT':1,PASSIVE:1,'Usually Completed':1,'Occasionally Late':1,'Rarely Completed':0,'Frequently Late':0,'Occasionally Absent':-1,'Frequently Absent':-2,'Always Absent':-3};
 export function resultTrend(current:string,previous:string){const a=RESULT_RANK[current];const b=RESULT_RANK[previous];if(a===undefined||b===undefined)return 'flat' as const;if(a>b)return 'up' as const;if(a<b)return 'down' as const;return 'flat' as const;}
 export function calculateStudentTrends(rows:Observation[],rules:Rules):MonthlyTrend[]{const byMonth=new Map<string,Observation[]>();for(const r of rows){const m=r.lessonDate.slice(0,7);byMonth.set(m,[...(byMonth.get(m)||[]),r]);}return [...byMonth.keys()].sort().map(m=>{const mr=byMonth.get(m)!;const s=summarize(mr,rules);return {month:m,lessons:s.lessons,attendanceRate:s.attendanceRate,performanceResult:s.performanceResult,homeworkResult:s.homeworkResult,participationResult:s.participationResult,conductResult:s.conductResult,punctualityResult:s.punctualityResult};});}
+export type StudentClubSummary={clubName:string;activities:number;months:string[];latest:{title:string;month:string;performance:string|null;comment:string|null}|null};
+export type ClubMembership={studentId:string;clubName:string};
+export type ClubRecordRow={studentId:string;clubName:string;activityId:string;activityDate:string;title:string;performance:string|null;comment:string|null};
+/** One short summary per club a child belongs to: activities in the period, months covered and the latest record. */
+export function summarizeClubs(memberships:ClubMembership[],records:ClubRecordRow[],months:string[]):Record<string,StudentClubSummary[]>{
+ const allowed=new Set(months);
+ const byStudent=new Map<string,Map<string,{clubName:string;activityIds:Set<string>;months:Set<string>;latest:ClubRecordRow|null}>>();
+ for(const m of memberships){
+  if(!m.studentId||!m.clubName)continue;
+  const clubs=byStudent.get(m.studentId)??new Map<string,{clubName:string;activityIds:Set<string>;months:Set<string>;latest:ClubRecordRow|null}>();
+  if(!clubs.has(m.clubName))clubs.set(m.clubName,{clubName:m.clubName,activityIds:new Set(),months:new Set(),latest:null});
+  byStudent.set(m.studentId,clubs);
+ }
+ for(const r of records){
+  const club=byStudent.get(r.studentId)?.get(r.clubName);
+  if(!club)continue;
+  const month=String(r.activityDate||'').slice(0,7);
+  if(allowed.size&&!allowed.has(month))continue;
+  club.activityIds.add(r.activityId);
+  if(month)club.months.add(month);
+  if(!club.latest||String(r.activityDate||'')>=String(club.latest.activityDate||''))club.latest=r;
+ }
+ const out:Record<string,StudentClubSummary[]>={};
+ for(const [studentId,clubs] of byStudent){
+  out[studentId]=[...clubs.values()].map(c=>({clubName:c.clubName,activities:c.activityIds.size,months:[...c.months].sort(),latest:c.latest?{title:c.latest.title,month:String(c.latest.activityDate||'').slice(0,7),performance:c.latest.performance,comment:c.latest.comment}:null})).sort((a,b)=>a.clubName.localeCompare(b.clubName));
+ }
+ return out;
+}

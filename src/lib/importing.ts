@@ -16,7 +16,7 @@ export type SheetData = { name: string; rows: string[][] };
 export type ParsedRows = { headers: string[]; rows: Record<string, string>[]; notes: string[] };
 
 export const importFields: Record<ImportKind, string[]> = {
-  students: ['Student ID', 'Student Name', 'Grade', 'Class', 'Academic Year', 'Status'],
+  students: ['Student ID', 'Student Name', 'Year', 'Class', 'Academic Year', 'Status'],
   teachers: ['Teacher ID', 'Teacher Name', 'Email', 'Contact Detail', 'Nationality', 'Subjects', 'Classes'],
 };
 
@@ -72,11 +72,11 @@ export const cellText = (value: unknown): string => {
   return '';
 };
 
-// "7A" → "Grade 7", "10" → "Grade 10", "MP1" → "MP", anything else → itself.
+// "7A" → "Year 7", "10" → "Year 10", "MP1" → "MP", anything else → itself.
 export const gradeNameForClass = (className: string): string => {
   const name = normalizeValue(className);
   const numeric = /^(\d+)\s*[A-Za-z]*$/.exec(name);
-  if (numeric) return `Grade ${numeric[1]}`;
+  if (numeric) return `Year ${numeric[1]}`;
   const lettered = /^([A-Za-z]+)\s*\d+$/.exec(name);
   if (lettered) return lettered[1].toUpperCase();
   return name;
@@ -226,7 +226,7 @@ export function buildStudentImportRows(sheets: SheetData[], academicYear: string
         rows.push({
           'Student ID': studentId,
           'Student Name': fullName,
-          'Grade': gradeNameForClass(className),
+          'Year': gradeNameForClass(className),
           'Class': className,
           'Academic Year': academicYear,
           'Status': statusColumn ? normalizeValue(row[start + 4]).toUpperCase() : '',

@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { AlertTriangle, Plus, CheckCircle, RefreshCw, Filter } from 'lucide-react';
+import { AlertTriangle, CheckCircle, GraduationCap, RefreshCw } from 'lucide-react';
 
 interface Observation {
   id: string;
@@ -22,12 +22,12 @@ export default function BehaviourView({
   api,
   post,
   userRole,
-  onOpenNewModal,
+  onOpenRoster,
 }: {
   api: (view: string, params?: Record<string, string>) => Promise<any>;
   post: (action: string, data: unknown) => Promise<any>;
   userRole: string;
-  onOpenNewModal?: () => void;
+  onOpenRoster?: () => void;
 }) {
   const [filterFollowUp, setFilterFollowUp] = useState(false);
   const [observations, setObservations] = useState<Observation[]>([]);
@@ -49,7 +49,7 @@ export default function BehaviourView({
 
   const resolveFollowUp = async (id: string) => {
     try {
-      await post('resolveFollowUp', { id });
+      await post('resolveFollowUp', { id, resolved: true });
       setNotice('Follow-up marked as resolved.');
       loadData();
       setTimeout(() => setNotice(null), 3000);
@@ -77,8 +77,8 @@ export default function BehaviourView({
             />
             <span style={{ fontSize: 13, fontWeight: 500 }}>Follow-up required only</span>
           </label>
-          <button className="btn primary" onClick={() => onOpenNewModal?.()}>
-            <Plus size={15} /> Log Observation
+          <button className="btn primary" onClick={() => onOpenRoster?.()}>
+            <GraduationCap size={15} /> Log from Student Roster
           </button>
           <button className="btn outline" onClick={loadData} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'spinning' : ''} /> Refresh

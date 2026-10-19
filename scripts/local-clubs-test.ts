@@ -141,7 +141,7 @@ async function main() {
   const recordFor = (ids: string[], patch: Record<string, unknown> = {}) =>
     ids.map((studentId) => ({ studentId, punctuality: 'ALWAYS_ON_TIME', performance: 'GOOD', participation: 'ACTIVE', conduct: 'GOOD', comment: '', ...patch }));
   const saveActivity = (payload: Record<string, unknown>) => action('saveClubActivity', {
-    clubId, activityDate: '2026-10-02', description: 'Built two line-following robots', ...payload,
+    clubId, activityDate: '2026-10', description: 'Built two line-following robots', ...payload,
   });
 
   const noRows = await saveActivity({ title: 'Draft without records' });
@@ -190,7 +190,7 @@ async function main() {
   const doubleSubmit = await action('submitClubActivity', { id: activityId });
   check('double submit rejected', doubleSubmit.status >= 400, doubleSubmit.body);
 
-  const editSubmitted = await action('saveClubActivity', { id: activityId, clubId, title: 'Edited while submitted', activityDate: '2026-10-02' });
+  const editSubmitted = await action('saveClubActivity', { id: activityId, clubId, title: 'Edited while submitted', activityDate: '2026-10' });
   check('editing submitted activity rejected', editSubmitted.status >= 400, editSubmitted.body);
 
   const returnNoReason = await action('reviewClubActivity', { id: activityId, status: 'RETURNED' });
@@ -199,7 +199,7 @@ async function main() {
   const returned = await action('reviewClubActivity', { id: activityId, status: 'RETURNED', comment: 'Add attendance numbers' });
   check('admin returns activity with reason', returned.status === 200 && returned.body.status === 'RETURNED', returned.body);
 
-  const reEdit = await action('saveClubActivity', { id: activityId, clubId, title: 'First build session (revised)', activityDate: '2026-10-02', description: '12 present, 2 absent' });
+  const reEdit = await action('saveClubActivity', { id: activityId, clubId, title: 'First build session (revised)', activityDate: '2026-10', description: '12 present, 2 absent' });
   check('returned activity reverts to draft on edit', reEdit.status === 200 && reEdit.body.status === 'DRAFT', reEdit.body);
 
   const resubmit = await action('submitClubActivity', { id: activityId });
@@ -273,7 +273,7 @@ async function main() {
   check('teacher sees the club member roster', accessMembers.length === accessStudentIds.length, view.body.members);
 
   const teacherSave = await action('saveClubActivity', {
-    clubId: accessClubId, title: 'Teacher recorded session', activityDate: '2026-10-03', description: 'Practice',
+    clubId: accessClubId, title: 'Teacher recorded session', activityDate: '2026-10', description: 'Practice',
     records: accessMembers.map((studentId: string) => ({ studentId, punctuality: 'USUALLY_ON_TIME', performance: 'EXCELLENT', participation: 'ACTIVE', conduct: 'GOOD', comment: 'Led the warm-up' })),
   });
   check('assigned teacher can record activity', teacherSave.status === 200 && teacherSave.body.status === 'DRAFT', teacherSave.body);
@@ -281,7 +281,7 @@ async function main() {
   const teacherSubmit = await action('submitClubActivity', { id: teacherActivityId });
   check('teacher submits activity with member records', teacherSubmit.status === 200 && teacherSubmit.body.status === 'SUBMITTED', teacherSubmit.body);
 
-  const teacherIncomplete = await action('saveClubActivity', { clubId: accessClubId, title: 'Teacher session without rows', activityDate: '2026-10-03' });
+  const teacherIncomplete = await action('saveClubActivity', { clubId: accessClubId, title: 'Teacher session without rows', activityDate: '2026-10' });
   const teacherIncompleteSubmit = await action('submitClubActivity', { id: teacherIncomplete.body.id });
   check('teacher cannot submit without member rows', teacherIncompleteSubmit.status >= 400, teacherIncompleteSubmit.body);
 
@@ -300,7 +300,7 @@ async function main() {
     await login({ identity: others[0].username, password: others[0].password });
     view = await call('/api/app?view=clubs');
     check('unassigned teacher does not see the club', !(view.body.clubs as any[]).some((c) => c.id === accessClubId), view.body.clubs);
-    const outsiderSave = await action('saveClubActivity', { clubId: accessClubId, title: 'Outsider session', activityDate: '2026-10-03' });
+    const outsiderSave = await action('saveClubActivity', { clubId: accessClubId, title: 'Outsider session', activityDate: '2026-10' });
     check('unassigned teacher cannot record activity', outsiderSave.status >= 400, outsiderSave.body);
   } else {
     check('unassigned teacher access check (skipped, no CSV credentials)', true);

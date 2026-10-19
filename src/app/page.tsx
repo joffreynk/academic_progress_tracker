@@ -46,7 +46,7 @@ import BehaviourView from '@/components/BehaviourView';
 import ClubsView from '@/components/ClubsView';
 import MonthlyEntryView from '@/components/MonthlyEntryView';
 import PeriodPicker from '@/components/PeriodPicker';
-import { resultTrend, type Observation, type Rules, type SubjectComparison } from '@/lib/reporting';
+import { resultTrend, type Observation, type Rules, type StudentClubSummary, type SubjectComparison } from '@/lib/reporting';
 import { thisMonthPeriod, buildPeriod, periodLabel, periodSlug, monthLabel, shiftDays, type Period } from '@/lib/period';
 import { downloadClassSummaryPdf, downloadClassReportsZip, pretty } from '@/lib/reportPdf';
 import { importFields, requiredImportFields, safeCsvCell, toCsv, type ImportKind } from '@/lib/importing';
@@ -221,6 +221,10 @@ type Summary = {
   version: number;
 };
 
+const entityLabel = (type: string) => (type === 'year' ? 'Academic Year' : type === 'grade' ? 'Year' : pretty(type));
+
+const entityPlural = (type: string) => (type === 'class' ? 'Classes' : type === 'year' ? 'Academic Years' : `${entityLabel(type)}s`);
+
 const fieldMap: Record<string, { key: string; label: string; type?: string; options?: string; placeholder?: string }[]> = {
   year: [
     { key: 'name', label: 'Academic year', placeholder: '2026-2027' },
@@ -234,12 +238,12 @@ const fieldMap: Record<string, { key: string; label: string; type?: string; opti
     { key: 'endDate', label: 'End date', type: 'date' },
   ],
   grade: [
-    { key: 'name', label: 'Grade name', placeholder: 'Grade 7' },
+    { key: 'name', label: 'Year name', placeholder: 'Year 7' },
     { key: 'orderIndex', label: 'Display order', type: 'number' },
   ],
   class: [
     { key: 'name', label: 'Class name', placeholder: '7A' },
-    { key: 'gradeId', label: 'Grade', options: 'grades' },
+    { key: 'gradeId', label: 'Year', options: 'grades' },
     { key: 'academicYearId', label: 'Academic year', options: 'years' },
   ],
   subject: [
@@ -263,7 +267,7 @@ const fieldMap: Record<string, { key: string; label: string; type?: string; opti
     { key: 'studentId', label: 'Student ID' },
     { key: 'firstName', label: 'First name' },
     { key: 'lastName', label: 'Last name' },
-    { key: 'gradeId', label: 'Grade', options: 'grades' },
+    { key: 'gradeId', label: 'Year', options: 'grades' },
     { key: 'classId', label: 'Class', options: 'classes' },
     { key: 'academicYearId', label: 'Academic year', options: 'years' },
   ],
@@ -411,6 +415,7 @@ export default function Home() {
   const [studentPage, setStudentPage] = useState(0);
   const [studentsHasMore, setStudentsHasMore] = useState(false);
   const [selectedClass, setSelectedClass] = useState('');
+  const [studentSort, setStudentSort] = useState<'name' | 'class'>('name');
   const [selectedSubject, setSelectedSubject] = useState('');
   const [reports, setReports] = useState<{ id: string; lessonDate: string; topic: string; status: string; className: string; subjectName: string; teacherName: string; reviewComment?: string | null; recordsCount?: number; rosterCount?: number; completionRate?: number; kind?: 'lesson' | 'monthly'; month?: string }[]>([]);
   
@@ -431,10 +436,11 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [entity, setEntity] = useState('year');
+  const [entityQuery, setEntityQuery] = useState('');
   const [form, setForm] = useState<Record<string, any>>({});
   const [config, setConfig] = useState<{ settings: any; closures: { month: string; closed: boolean }[]; organization: any } | null>(null);
   const [organizations, setOrganizations] = useState<{ id: string; name: string; code: string; domain: string | null; logoUrl: string | null; timezone: string; active: boolean; primaryAdminUserId: string | null; studentCount?: number; teacherCount?: number; classCount?: number; admin?: { id: string; name: string; username: string; email: string } | null }[]>([]);
-  const [orgForm, setOrgForm] = useState({ name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true });
+  const [orgForm, setOrgForm] = useState({ id: '', name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true });
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [mobile, setMobile] = useState(false);
 
@@ -450,7 +456,7 @@ export default function Home() {
   const [monthlySortCol, setMonthlySortCol] = useState<string>('studentName');
   const [monthlySortDir, setMonthlySortDir] = useState<'asc' | 'desc'>('asc');
   const [monthlySearch, setMonthlySearch] = useState('');
-  const [monthly, setMonthly] = useState<{ organization: string; period: Period; closedMonths: string[]; rules: Rules; summaries: Summary[]; comparison: SubjectComparison[]; raw: Observation[] } | null>(null);
+  const [monthly, setMonthly] = useState<{ organization: string; period: Period; closedMonths: string[]; rules: Rules; summaries: Summary[]; comparison: SubjectComparison[]; raw: Observation[]; clubs: Record<string, StudentClubSummary[]> } | null>(null);
 
   // Import state
   const [importKind, setImportKind] = useState<ImportKind>('students');
@@ -565,10 +571,13 @@ export default function Home() {
         .then((d) => setReports(d.reports))
         .catch((e) => setError(e.message));
     }
+    // Teachers may only read one assigned class, so a missing selection means nothing to
+    // fetch; the class selector clears the roster below instead of leaving stale rows.
     if (page === 'students' && (user.role === 'ADMIN' || selectedClass)) {
       api('students', {
         ...(selectedClass ? { classId: selectedClass } : {}),
         ...(search ? { search } : {}),
+        sort: studentSort,
         page: String(studentPage),
       })
         .then((d) => {
@@ -592,7 +601,7 @@ export default function Home() {
         .then(setConfig)
         .catch((e) => setError(e.message));
     }
-  }, [page, user, selectedClass, search, studentPage, reportFilterClass, reportFilterSubject, reportFilterStatus, reportFilterPeriod.from, reportFilterPeriod.to]);
+  }, [page, user, selectedClass, search, studentPage, studentSort, reportFilterClass, reportFilterSubject, reportFilterStatus, reportFilterPeriod.from, reportFilterPeriod.to]);
 
 
   const doLogin = (e: React.FormEvent) => {
@@ -782,6 +791,7 @@ export default function Home() {
         summaries: d.summaries,
         comparison: d.comparison ?? [],
         raw: d.data ?? [],
+        clubs: d.clubs ?? {},
       });
     });
   };
@@ -818,6 +828,7 @@ export default function Home() {
           summaries: d.summaries,
           comparison: d.comparison ?? [],
           raw: d.data ?? [],
+          clubs: d.clubs ?? {},
         });
       })
       .catch(() => {});
@@ -928,6 +939,15 @@ export default function Home() {
     year: ref?.years.find((y) => y.id === a.academicYearId)?.name || '—',
   });
 
+  const entityMatchesQuery = (item: any, type: string, qs: string) => {
+    if (!qs) return true;
+    if (type === 'assignment') {
+      const a = assignmentDisplay(item);
+      return [a.teacher, a.subject, a.cls, a.year].some((v) => v.toLowerCase().includes(qs));
+    }
+    return [item.name, item.fullName, item.email, item.code, item.username, item.teacherId, item.studentId].some((v) => v && String(v).toLowerCase().includes(qs));
+  };
+
   const createEntity = () => {
     const missing = (fieldMap[entity] || [])
       .filter((f) => !String(form[f.key] ?? '').trim())
@@ -941,8 +961,8 @@ export default function Home() {
       setForm({});
       setNotice(
         res?.reassignedFrom?.length
-          ? `${pretty(entity)} created — removed from ${res.reassignedFrom.join(', ')}.`
-          : `${pretty(entity)} created successfully.`
+          ? `${entityLabel(entity)} created — removed from ${res.reassignedFrom.join(', ')}.`
+          : `${entityLabel(entity)} created successfully.`
       );
       await refresh();
     });
@@ -963,7 +983,7 @@ export default function Home() {
       ];
     } else if (type === 'grade') {
       fields = [
-        { key: 'name', label: 'Grade Name', value: item.name },
+        { key: 'name', label: 'Year Name', value: item.name },
         { key: 'orderIndex', label: 'Display Order', type: 'number', value: item.orderIndex },
         { key: 'active', label: 'Active Status', type: 'checkbox', value: item.active !== false },
       ];
@@ -994,7 +1014,7 @@ export default function Home() {
         { key: 'lastName', label: 'Last Name', value: item.lastName || item.fullName.split(' ').slice(1).join(' ') },
         { key: 'studentId', label: 'Student ID', value: item.studentId },
         { key: 'classId', label: 'Class', value: item.classId, options: ref?.classes.map((c) => ({ label: c.name, value: c.id })) },
-        { key: 'gradeId', label: 'Grade', value: item.gradeId, options: ref?.grades.map((g) => ({ label: g.name, value: g.id })) },
+        { key: 'gradeId', label: 'Year', value: item.gradeId, options: ref?.grades.map((g) => ({ label: g.name, value: g.id })) },
         { key: 'academicYearId', label: 'Academic Year', value: item.academicYearId, options: ref?.years.map((y) => ({ label: y.name, value: y.id })) },
         { key: 'status', label: 'Status', value: item.status, options: [{ label: 'Active', value: 'ACTIVE' }, { label: 'Inactive', value: 'INACTIVE' }] },
       ];
@@ -1010,15 +1030,15 @@ export default function Home() {
 
     setModalConfig({
       type: 'edit_entity',
-      title: `Edit ${pretty(type)}`,
+      title: `Edit ${entityLabel(type)}`,
       fields,
       onConfirm: (vals) => {
         run(async () => {
           const res = await post('updateEntity', { id: item.id, ...vals }, { type });
           setNotice(
             res?.reassignedFrom?.length
-              ? `${pretty(type)} updated — removed from ${res.reassignedFrom.join(', ')}.`
-              : `${pretty(type)} updated successfully.`
+              ? `${entityLabel(type)} updated — removed from ${res.reassignedFrom.join(', ')}.`
+              : `${entityLabel(type)} updated successfully.`
           );
           await refresh();
         });
@@ -1029,14 +1049,14 @@ export default function Home() {
   const initiateDeleteEntity = (type: string, id: string, name: string) => {
     setModalConfig({
       type: 'confirm',
-      title: `Deactivate / Delete ${pretty(type)}`,
+      title: `Deactivate / Delete ${entityLabel(type)}`,
       message: `Are you sure you want to deactivate or remove "${name}"? Related records may be affected.`,
       isDanger: true,
       confirmLabel: 'Confirm Removal',
       onConfirm: () => {
         run(async () => {
           await post('deleteEntity', undefined, { type, id });
-          setNotice(`${pretty(type)} removed or deactivated.`);
+          setNotice(`${entityLabel(type)} removed or deactivated.`);
           await refresh();
         });
       },
@@ -1064,6 +1084,8 @@ export default function Home() {
       studentId: s.id,
       studentName: s.fullName,
       classId: s.classId,
+      date: ref?.today || overview?.today || undefined,
+      minDate: ref?.minDate || undefined,
       onConfirm: (data) => {
         run(async () => {
           await post('observation', { studentId: s.id, classId: s.classId, ...data });
@@ -1278,6 +1300,11 @@ export default function Home() {
 
         <div className="content-container">
           {/* ================= PAGE: OVERVIEW ================= */}
+          {page === 'overview' && !overview && (
+            <div className="panel">
+              <Empty title="Loading overview" detail="Fetching the latest school figures…" />
+            </div>
+          )}
           {page === 'overview' && overview && (
             <div>
               <div className="welcome-banner" style={{ marginBottom: 20 }}>
@@ -1800,6 +1827,7 @@ export default function Home() {
                       today={ref?.today || overview?.today || ''}
                       onChange={setReportFilterPeriod}
                       label="Lesson date range"
+                      mode="month"
                     />
                   </div>
                 </div>
@@ -1878,26 +1906,42 @@ export default function Home() {
                   <h2>Student Enrollment & Rosters</h2>
                   <p>View student records, record pastoral observations, and view longitudinal student profiles.</p>
                 </div>
-                <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, margin: 0 }}>
                     <Search size={16} />
                     <input
                       type="text"
-                      placeholder="Search student or ID..."
+                      placeholder="Search name, ID or class..."
                       value={search}
-                      onChange={(e) => setSearch(e.target.value)}
+                      onChange={(e) => { setSearch(e.target.value); setStudentPage(0); }}
                       style={{ width: 180 }}
                     />
                   </label>
                   <select
                     value={selectedClass}
-                    onChange={(e) => setSelectedClass(e.target.value)}
+                    onChange={(e) => {
+                      setSelectedClass(e.target.value);
+                      setStudentPage(0);
+                      // Drop the rows already on screen: a teacher without a class selection
+                      // has nothing to fetch, so keeping them would show the wrong cohort.
+                      setStudents([]);
+                      setStudentsHasMore(false);
+                    }}
                     style={{ width: 150 }}
                   >
                     <option value="">All Cohorts</option>
                     {ref?.classes.map((c) => (
                       <option key={c.id} value={c.id}>{c.name}</option>
                     ))}
+                  </select>
+                  <select
+                    value={studentSort}
+                    onChange={(e) => { setStudentSort(e.target.value as 'name' | 'class'); setStudentPage(0); }}
+                    style={{ width: 145 }}
+                    aria-label="Sort students by"
+                  >
+                    <option value="name">Sort: Name</option>
+                    <option value="class">Sort: Class</option>
                   </select>
                 </div>
               </div>
@@ -2015,6 +2059,7 @@ export default function Home() {
                       onChange={setMonthlyPeriod}
                       months={monthly?.period.months}
                       closedMonths={monthly?.closedMonths}
+                      mode="month"
                     />
                   </div>
                   <label>
@@ -2054,11 +2099,27 @@ export default function Home() {
                     <>
                       <label>
                         Academic Year
-                        <select value={monthlyYear} onChange={(e) => setMonthlyYear(e.target.value)}>
+                        <select value={monthlyYear} onChange={(e) => {
+                          setMonthlyYear(e.target.value);
+                          // Keep the term filter consistent with the selected year.
+                          const keep = ref?.terms.find((t) => t.id === monthlyTerm);
+                          if (keep && e.target.value && keep.academicYearId !== e.target.value) setMonthlyTerm('');
+                        }}>
                           <option value="">All years</option>
                           {ref?.years.map((y) => <option key={y.id} value={y.id}>{y.name}</option>)}
                         </select>
                       </label>
+                      {ref && ref.terms.length > 0 && (
+                        <label>
+                          Term
+                          <select value={monthlyTerm} onChange={(e) => setMonthlyTerm(e.target.value)}>
+                            <option value="">All terms</option>
+                            {ref.terms
+                              .filter((t) => t.active !== false && (!monthlyYear || t.academicYearId === monthlyYear))
+                              .map((t) => <option key={t.id} value={t.id}>{t.name} ({t.startDate} – {t.endDate})</option>)}
+                          </select>
+                        </label>
+                      )}
                       <label>
                         Teacher
                         <select value={monthlyTeacher} onChange={(e) => setMonthlyTeacher(e.target.value)}>
@@ -2095,6 +2156,7 @@ export default function Home() {
                             const result = await downloadClassReportsZip({
                               school: monthly.organization, period: monthly.period, closedMonths: monthly.closedMonths,
                               summaries: monthly.summaries, comparison: monthly.comparison, data: monthly.raw, rules: monthly.rules,
+                              clubs: monthly.clubs,
                               logoUrl: ref?.organization?.logoUrl || '/icons/school_logo.png',
                               onProgress: (done, total) => setNotice(`Building student PDFs… ${done} of ${total}`),
                             });
@@ -2213,6 +2275,7 @@ export default function Home() {
                       summaries={monthly.summaries}
                       comparison={monthly.comparison}
                       data={monthly.raw}
+                      clubs={monthly.clubs}
                       rules={monthly.rules}
                     />
                   </div>
@@ -2264,9 +2327,7 @@ export default function Home() {
               api={api}
               post={post}
               userRole={user.role}
-              onOpenNewModal={() => {
-                if (students[0]) openBehaviourModal(students[0]);
-              }}
+              onOpenRoster={() => setPage('students')}
             />
           )}
 
@@ -2288,26 +2349,32 @@ export default function Home() {
           )}
 
           {/* ================= PAGE: ENTITY MANAGEMENT (ADMIN CRUD) ================= */}
+          {page === 'manage' && user.role === 'ADMIN' && !ref && (
+            <div className="panel">
+              <Empty title="Loading reference data" detail="Fetching years, classes and rosters…" />
+            </div>
+          )}
           {page === 'manage' && user.role === 'ADMIN' && ref && (
             <div>
               <div className="management-tabs" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                {['year', 'term', 'grade', 'class', 'subject', 'teacher', 'assignment'].map((t) => (
+                {['year', 'term', 'grade', 'class', 'subject', 'student', 'teacher', 'assignment'].map((t) => (
                   <button
                     key={t}
                     className={`btn ${entity === t ? 'primary' : 'outline'}`}
                     onClick={() => {
                       setEntity(t);
+                      setEntityQuery('');
                       setForm({});
                     }}
                   >
-                    {pretty(t)}s
+                    {entityPlural(t)}
                   </button>
                 ))}
               </div>
 
               {/* Create Form */}
               <div className="panel form-panel" style={{ marginBottom: 20 }}>
-                <h3>Add New {pretty(entity)}</h3>
+                <h3>Add New {entityLabel(entity)}</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginTop: 12 }}>
                   {fieldMap[entity]?.map((f) => (
                     <label key={f.key}>
@@ -2318,7 +2385,7 @@ export default function Home() {
                           onChange={(e) => {
                             const value = e.target.value;
                             const next: Record<string, string> = { ...form, [f.key]: value };
-                            // Picking a class also selects the grade and academic year it belongs to.
+                            // Picking a class also selects the year level and academic year it belongs to.
                             if (f.key === 'classId' && value) {
                               const chosen = (ref as any)?.classes?.find((c: any) => c.id === value);
                               const fields = fieldMap[entity] || [];
@@ -2347,13 +2414,25 @@ export default function Home() {
                   ))}
                 </div>
                 <button className="btn primary" style={{ marginTop: 16 }} onClick={createEntity} disabled={busy}>
-                  <Plus size={16} /> Create {pretty(entity)}
+                  <Plus size={16} /> Create {entityLabel(entity)}
                 </button>
               </div>
 
               {/* Entity List with Edit, Deactivate & Reset Password Actions */}
               <div className="panel">
-                <h3>Existing {pretty(entity)}s</h3>
+                <div className="list-toolbar" style={{ marginBottom: 0 }}>
+                  <h3 style={{ margin: 0 }}>Existing {entityPlural(entity)}</h3>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, margin: 0 }}>
+                    <Search size={16} />
+                    <input
+                      type="text"
+                      placeholder={entity === 'assignment' ? 'Search teacher or subject...' : `Search ${entityPlural(entity).toLowerCase()}...`}
+                      value={entityQuery}
+                      onChange={(e) => setEntityQuery(e.target.value)}
+                      style={{ width: 200 }}
+                    />
+                  </label>
+                </div>
                 <div className="table-scroll" style={{ marginTop: 12 }}>
                   <table>
                     <thead>
@@ -2365,7 +2444,7 @@ export default function Home() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(((ref as any)[entity === 'class' ? 'classes' : `${entity}s`]) || []).map((item: any) => {
+                      {(((ref as any)[entity === 'class' ? 'classes' : `${entity}s`]) || []).filter((item: any) => entityMatchesQuery(item, entity, entityQuery.trim().toLowerCase())).map((item: any) => {
                         const a = entity === 'assignment' ? assignmentDisplay(item) : null;
                         return (
                         <tr key={item.id}>
@@ -2383,16 +2462,21 @@ export default function Home() {
                             {item.orderIndex !== undefined && <span>Order: {item.orderIndex}</span>}
                             {a && <span>Class: {a.cls} · Year: {a.year}</span>}
                             {!a && item.gradeId && (
-                              <span>Grade: {ref?.grades?.find((g) => g.id === item.gradeId)?.name || '—'}</span>
+                              <span>Year: {ref?.grades?.find((g) => g.id === item.gradeId)?.name || '—'}</span>
                             )}
                             {!a && item.classId && (
                               <span>Class: {ref?.classes?.find((c) => c.id === item.classId)?.name || '—'} · Subject: {ref?.subjects?.find((s) => s.id === item.subjectId)?.name || '—'}</span>
                             )}
                           </td>
                           <td>
-                            <span className={`badge ${item.active !== false ? 'badge-approved' : 'badge-returned'}`}>
-                              {item.active !== false ? 'Active' : 'Inactive'}
-                            </span>
+                            {(() => {
+                              const active = entity === 'student' ? item.status === 'ACTIVE' : item.active !== false;
+                              return (
+                                <span className={`badge ${active ? 'badge-approved' : 'badge-returned'}`}>
+                                  {active ? 'Active' : 'Inactive'}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td>
                             <div style={{ display: 'flex', gap: 6 }}>
@@ -2412,18 +2496,28 @@ export default function Home() {
                                   <KeyRound size={13} /> Reset Pwd
                                 </button>
                               )}
-                              <button
-                                className="btn outline"
-                                style={{ padding: '4px 8px', fontSize: 12, color: '#c67a53' }}
-                                onClick={() => initiateDeleteEntity(entity, item.id, a ? `${a.teacher} · ${a.subject} · ${a.cls}` : item.name || item.email || entity)}
-                              >
-                                <Trash2 size={13} />
-                              </button>
+                              {entity !== 'year' && entity !== 'teacher' && (
+                                <button
+                                  className="btn outline"
+                                  style={{ padding: '4px 8px', fontSize: 12, color: '#c67a53' }}
+                                  onClick={() => initiateDeleteEntity(entity, item.id, a ? `${a.teacher} · ${a.subject} · ${a.cls}` : item.name || item.email || item.fullName || entityLabel(entity))}
+                                  title={`Deactivate ${entityLabel(entity)}`}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
                         );
                       })}
+                      {entityQuery.trim() && (((ref as any)[entity === 'class' ? 'classes' : `${entity}s`]) || []).filter((item: any) => entityMatchesQuery(item, entity, entityQuery.trim().toLowerCase())).length === 0 && (
+                        <tr>
+                          <td colSpan={4} style={{ textAlign: 'center', color: '#748792', padding: 24 }}>
+                            No {entityPlural(entity).toLowerCase()} match “{entityQuery.trim()}”.
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -2462,7 +2556,7 @@ export default function Home() {
 
               <p className="muted" style={{ fontSize: 12, marginBottom: 16 }}>
                 {importKind === 'students'
-                  ? 'Students workbook: every sheet with a No / Name / Surname / Year header row is read (including sheets with two class tables side by side). Missing grades, classes and the academic year are created automatically.'
+                  ? 'Students workbook: every sheet with a No / Name / Surname / Year header row is read (including sheets with two class tables side by side). Missing years, classes and the academic year are created automatically.'
                   : 'Teacher workbook: title rows are skipped, teachers listed on several rows are merged, and SUBJECTS / CLASSES become teaching assignments. Missing subjects and classes are created automatically.'}
               </p>
 
@@ -2588,7 +2682,7 @@ export default function Home() {
                       Created automatically:{' '}
                       {[
                         importResult.created.years ? `${importResult.created.years} academic year(s)` : '',
-                        importResult.created.grades ? `${importResult.created.grades} grade(s)` : '',
+                        importResult.created.grades ? `${importResult.created.grades} year(s)` : '',
                         importResult.created.classes ? `${importResult.created.classes} class(es)` : '',
                         importResult.created.subjects ? `${importResult.created.subjects} subject(s)` : '',
                       ]
@@ -2690,7 +2784,7 @@ export default function Home() {
                 <div className="list-toolbar">
                   <div>
                     <div className="eyebrow">MULTI-TENANT PLATFORM GOVERNANCE</div>
-                    <h2>{orgForm.name ? 'Edit organization' : 'Create organization'}</h2>
+                    <h2>{orgForm.id ? 'Edit organization' : 'Create organization'}</h2>
                     <p>Provision and configure school instances across all jurisdictions.</p>
                   </div>
                 </div>
@@ -2712,13 +2806,18 @@ export default function Home() {
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
                   <button className="btn primary" onClick={() => run(async () => {
-                    const payload = { ...orgForm, id: undefined as string | undefined };
+                    const payload = { ...orgForm, id: orgForm.id || undefined };
                     await post('organization', payload);
-                    setNotice('Organization saved successfully.');
-                    setOrgForm({ name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true });
+                    setNotice(orgForm.id ? 'Organization updated successfully.' : 'Organization created successfully.');
+                    setOrgForm({ id: '', name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true });
                     const res = await api('organizations');
                     setOrganizations(res.organizations);
-                  })}>Create Organization</button>
+                  })}>{orgForm.id ? 'Save Organization' : 'Create Organization'}</button>
+                  {orgForm.id && (
+                    <button className="btn outline" onClick={() => setOrgForm({ id: '', name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true })}>
+                      Cancel
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -2745,6 +2844,13 @@ export default function Home() {
                       </tr>
                     </thead>
                     <tbody>
+                      {organizations.length === 0 && (
+                        <tr>
+                          <td colSpan={8} style={{ textAlign: 'center', color: '#748792', padding: 24 }}>
+                            No organizations have been provisioned yet.
+                          </td>
+                        </tr>
+                      )}
                       {organizations.map((org) => (
                         <tr key={org.id}>
                           <td><strong>{org.name}</strong><div style={{ fontSize: 11, color: '#748792' }}>{org.domain || 'No domain'}</div></td>
@@ -2762,6 +2868,7 @@ export default function Home() {
                             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                               <button className="btn outline" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => {
                                 setOrgForm({
+                                  id: org.id,
                                   name: org.name,
                                   code: org.code,
                                   timezone: org.timezone,
@@ -2769,6 +2876,7 @@ export default function Home() {
                                   logoUrl: org.logoUrl || '',
                                   active: org.active,
                                 });
+                                window.scrollTo({ top: 0, behavior: 'smooth' });
                               }}>
                                 Edit
                               </button>
@@ -2779,12 +2887,6 @@ export default function Home() {
                                 setOrganizations(res.organizations);
                               })}>
                                 {org.active ? 'Deactivate' : 'Activate'}
-                              </button>
-                              <button className="btn outline" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => {
-                                setNotice(`Organization context opened for ${org.name}.`);
-                                setPage('overview');
-                              }}>
-                                Open Organization
                               </button>
                               <button className="btn outline" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => {
                                 const admin = org.admin;
@@ -2839,6 +2941,11 @@ export default function Home() {
           )}
 
           {/* ================= PAGE: SETTINGS (ADMIN) ================= */}
+          {page === 'settings' && user.role === 'ADMIN' && !config && (
+            <div className="panel">
+              <Empty title="Loading settings" detail="Fetching organization configuration…" />
+            </div>
+          )}
           {page === 'settings' && user.role === 'ADMIN' && config && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
               {/* Organization & Threshold Settings */}
@@ -3167,7 +3274,7 @@ export default function Home() {
                           </td>
                           <td><code>{log.action}</code></td>
                           <td>{log.entityType}</td>
-                          <td style={{ fontSize: 12 }}>{log.userId || 'System'}</td>
+                          <td style={{ fontSize: 12 }}>{log.username || 'System'}</td>
                           <td style={{ fontSize: 12, maxWidth: 300 }}>
                             {log.metadata ? JSON.stringify(log.metadata) : '—'}
                           </td>

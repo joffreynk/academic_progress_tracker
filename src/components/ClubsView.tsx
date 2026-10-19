@@ -4,6 +4,10 @@ import { Plus, RefreshCw, CheckCircle2, Edit3, Trash2, X, Search, Users, Clock3,
 import type { ModalConfig } from '@/components/Modal';
 import { downloadClubReportsZip } from '@/lib/reportPdf';
 import { punctualityLabels, punctualityLevels, performanceLevels, participationLevels, conductLevels } from '@/lib/monthly';
+import { monthLabel } from '@/lib/period';
+
+/** Club activities are recorded per month; rows saved before that still carry a full date. */
+const activityMonth = (value: string) => monthLabel(value.slice(0, 7));
 
 type Club = { id: string; name: string; description: string | null; academicYearId: string | null; active: boolean };
 type ClubTeacherRow = { clubId: string; teacherId: string; role: string; teacherName: string; active: boolean };
@@ -191,7 +195,7 @@ export default function ClubsView({
         : defaultRecord();
     });
     setActivityForm({
-      ...(activity ? { id: activity.id, title: activity.title, activityDate: activity.activityDate, description: activity.description } : { title: '', activityDate: today, description: '' }),
+      ...(activity ? { id: activity.id, title: activity.title, activityDate: activity.activityDate.slice(0, 7), description: activity.description } : { title: '', activityDate: today.slice(0, 7), description: '' }),
       clubId,
       records,
     });
@@ -466,8 +470,8 @@ export default function ClubsView({
               <input value={activityForm.title} onChange={(e) => setActivityForm({ ...activityForm, title: e.target.value })} placeholder="Inter-school debate practice" />
             </label>
             <label>
-              Activity date
-              <input type="date" value={activityForm.activityDate} onChange={(e) => setActivityForm({ ...activityForm, activityDate: e.target.value })} />
+              Activity month
+              <input type="month" value={activityForm.activityDate} onChange={(e) => setActivityForm({ ...activityForm, activityDate: e.target.value })} />
             </label>
             <label style={{ gridColumn: '1 / -1' }}>
               What happened
@@ -686,7 +690,7 @@ export default function ClubsView({
                       <table>
                         <thead>
                           <tr>
-                            <th>DATE</th>
+                            <th>MONTH</th>
                             <th>ACTIVITY</th>
                             <th>STATUS</th>
                             <th>REVIEW NOTE</th>
@@ -701,7 +705,7 @@ export default function ClubsView({
                             return (
                               <Fragment key={a.id}>
                                 <tr>
-                                  <td>{a.activityDate}</td>
+                                  <td>{activityMonth(a.activityDate)}</td>
                                   <td>
                                     <strong>{a.title}</strong>
                                     {a.description && <small>{a.description}</small>}

@@ -2,8 +2,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowRight, ArrowUp, Download, Printer } from 'lucide-react';
 import type ExcelJS from 'exceljs';
-import { resultTrend, summarize, summarizeByMonth, type Observation, type Rules, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
-import { monthLabelShort, periodLabel, periodSlug, type Period } from '@/lib/period';
+import { resultTrend, summarize, summarizeByMonth, type Observation, type Rules, type StudentClubSummary, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
+import { monthLabelShort, periodLabel, periodMonthsLabel, periodSlug, type Period } from '@/lib/period';
 import { downloadStudentPdf, downloadClassReportsZip, pretty } from '@/lib/reportPdf';
 import { FALLBACK_LOGO_DATA_URL } from '@/lib/defaultLogo';
 
@@ -11,26 +11,27 @@ type Summary={studentId:string;studentName:string;studentCode:string;className:s
 const countText=(values:Record<string,number>)=>Object.entries(values).sort((a,b)=>b[1]-a[1]).map(([key,count])=>`${pretty(key)} ${count}`).join(' · ')||'No observations';
 const PILL_KEYS=['EXCELLENT','GOOD','NEEDS_IMPROVEMENT'];
 
-type Metric={key:string;label:string;render:(m:SubjectMonthSummary)=>string;numeric:(m:SubjectMonthSummary)=>number|null;higherIsBetter:boolean};
+type Metric={key:string;resultKey: keyof SubjectMonthSummary;label:string;render:(m:SubjectMonthSummary)=>string;numeric:(m:SubjectMonthSummary)=>number|null;higherIsBetter:boolean};
 const METRICS:Metric[]=[
-  {key:'lessons',label:'Lessons recorded',render:m=>String(m.lessons),numeric:m=>m.lessons,higherIsBetter:true},
-  {key:'performance',label:'Performance',render:m=>m.performanceResult==='No data'?'—':pretty(m.performanceResult),numeric:()=>null,higherIsBetter:true},
-  {key:'participation',label:'Participation',render:m=>m.participationResult==='No data'?'—':pretty(m.participationResult),numeric:()=>null,higherIsBetter:true},
-  {key:'homework',label:'Homework',render:m=>m.homeworkResult,numeric:()=>null,higherIsBetter:true},
-  {key:'conduct',label:'Conduct',render:m=>m.conductResult==='No data'?'—':pretty(m.conductResult),numeric:()=>null,higherIsBetter:true},
-  {key:'punctuality',label:'Punctuality',render:m=>m.punctualityResult,numeric:()=>null,higherIsBetter:true},
+  {key:'lessons',resultKey:'lessons',label:'Lessons recorded',render:m=>String(m.lessons),numeric:m=>m.lessons,higherIsBetter:true},
+  {key:'performance',resultKey:'performanceResult',label:'Performance',render:m=>m.performanceResult==='No data'?'—':pretty(m.performanceResult),numeric:()=>null,higherIsBetter:true},
+  {key:'participation',resultKey:'participationResult',label:'Participation',render:m=>m.participationResult==='No data'?'—':pretty(m.participationResult),numeric:()=>null,higherIsBetter:true},
+  {key:'homework',resultKey:'homeworkResult',label:'Homework',render:m=>m.homeworkResult,numeric:()=>null,higherIsBetter:true},
+  {key:'conduct',resultKey:'conductResult',label:'Conduct',render:m=>m.conductResult==='No data'?'—':pretty(m.conductResult),numeric:()=>null,higherIsBetter:true},
+  {key:'punctuality',resultKey:'punctualityResult',label:'Punctuality',render:m=>m.punctualityResult,numeric:()=>null,higherIsBetter:true},
 ];
 
 function Delta({ metric, current, previous }: { metric: Metric; current: SubjectMonthSummary | undefined; previous: SubjectMonthSummary | undefined }) {  if (!current) return null;
-  if (metric.numeric) {
-    const a = metric.numeric(current);
-    const b = previous ? metric.numeric(previous) : null;
-    if (a === null || b === null || a === b) return null;
+  // Numeric metrics compare counts; categorical ones fall through to the result trend.
+  const a = metric.numeric(current);
+  const b = previous ? metric.numeric(previous) : null;
+  if (a !== null && b !== null) {
+    if (a === b) return null;
     const rising = a > b;
     return <span className={`compare-delta ${metric.higherIsBetter ? (rising ? 'up' : 'down') : (rising ? 'down' : 'up')}`}>{rising ? <ArrowUp size={9} /> : <ArrowDown size={9} />}{Math.abs(a - b)}{metric.key === 'attendanceRate' ? 'pp' : ''}</span>;
   }
   if (!previous) return null;
-  const trend = resultTrend(current[metric.key as keyof SubjectMonthSummary] as string, previous[metric.key as keyof SubjectMonthSummary] as string);
+  const trend = resultTrend(current[metric.resultKey] as unknown as string, previous[metric.resultKey] as unknown as string);
   if (trend === 'flat') return null;
   return <span className={`compare-delta ${trend}`}>{trend === 'up' ? <ArrowUp size={9} /> : <ArrowDown size={9} />}</span>;
 }
@@ -75,10 +76,10 @@ function ComparisonTable({ title, months, rows, closedMonths }: { title: string;
                   const cell = byMonth.get(month);
                   const previous = index > 0 ? byMonth.get(months[index - 1]) : undefined;
                   if (!cell) return <td key={month}><span className="compare-value muted-cell">No data</span></td>;
-                  const pill = PILL_KEYS.includes(cell[metric.key as keyof SubjectMonthSummary] as string);
+                  const pill = PILL_KEYS.includes(cell[metric.resultKey] as unknown as string);
                   return (
                     <td key={month}>
-                      <span className={pill ? `compare-pill ${cell[metric.key as keyof SubjectMonthSummary]}` : 'compare-value'}>{metric.render(cell)}</span>
+                      <span className={pill ? `compare-pill ${cell[metric.resultKey] as unknown as string}` : 'compare-value'}>{metric.render(cell)}</span>
                       <Delta metric={metric} current={cell} previous={previous} />
                     </td>
                   );
@@ -92,7 +93,7 @@ function ComparisonTable({ title, months, rows, closedMonths }: { title: string;
   );
 }
 
-export default function MonthlyOverview({ period, closedMonths = [], school, logoUrl = null, summaries, comparison = [], data = [], rules, search = '', onSearch }:{period:Period;closedMonths?:string[];school:string;logoUrl?:string|null;summaries:Summary[];comparison?:SubjectComparison[];data?:Observation[];rules:Rules;search?:string;onSearch?:(v:string)=>void}){
+export default function MonthlyOverview({ period, closedMonths = [], school, logoUrl = null, summaries, comparison = [], data = [], clubs = {}, rules, search = '', onSearch }:{period:Period;closedMonths?:string[];school:string;logoUrl?:string|null;summaries:Summary[];comparison?:SubjectComparison[];data?:Observation[];clubs?:Record<string,StudentClubSummary[]>;rules:Rules;search?:string;onSearch?:(v:string)=>void}){
   const [student,setStudent]=useState('');
 const [msg,setMsg]=useState<string|null>(null);const [zipping,setZipping]=useState(false);
 useEffect(()=>{if(!msg)return;const t=setTimeout(()=>setMsg(null),7000);return()=>clearTimeout(t);},[msg]);
@@ -211,7 +212,7 @@ const exportStudentMonthly = async () => {
     if (!selected) return;
     await downloadStudentPdf({
       school, period, closedMonths, student: { id: selected.id, name: selected.name, code: selected.code, className: selected.className },
-      subjects, overall, comparable, overallMonths, raw: studentRows, rules, logoUrl,
+      subjects, overall, comparable, overallMonths, raw: studentRows, rules, clubs: clubs[selected.id] ?? [], logoUrl,
     });
     setMsg('Student follow-up PDF downloaded.');
   };
@@ -223,7 +224,7 @@ const exportStudentMonthly = async () => {
     setMsg(`Building PDF reports for ${names.length} students…`);
     try {
       const result = await downloadClassReportsZip({
-        school, period, closedMonths, summaries, comparison, data, rules, logoUrl,
+        school, period, closedMonths, summaries, comparison, data, rules, clubs, logoUrl,
         onProgress: (done, total) => setMsg(`Building PDF reports… ${done} of ${total}`),
       });
       setMsg(`Class reports ZIP downloaded: ${result.filename} (${result.count} student PDFs).`);
@@ -256,6 +257,7 @@ const exportStudentMonthly = async () => {
    </div>}
 
    <h3>3. Teacher / school comment</h3>{overall.observations.length?<ul>{overall.observations.map((o,i)=><li key={i}>{o.date} · {o.subject}: {o.comment}</li>)}</ul>:<p>No significant observations recorded for this period.</p>}
-   <h3>4. Report information</h3><p>Generated {new Date().toLocaleDateString('en-GB')} · Data period: {label} ({period.from} to {period.to}) · Rule version {overall.version} · Based on submitted, under-review and approved lesson records.</p></article>}
+   {(clubs[selected.id]||[]).length>0&&<><h3>4. Clubs &amp; activities</h3><ul>{(clubs[selected.id]||[]).map(c=><li key={c.clubName}><strong>{c.clubName}</strong> — {c.activities?`${c.activities} activit${c.activities===1?'y':'ies'}${c.months.length?` · ${periodMonthsLabel(c.months)}`:''}${c.latest?` · Latest: ${c.latest.title}${c.latest.comment?` (${c.latest.comment})`:''}`:''}`:'Member · no activities recorded in this period'}</li>)}</ul></>}
+   <h3>{(clubs[selected.id]||[]).length?'5':'4'}. Report information</h3><p>Generated {new Date().toLocaleDateString('en-GB')} · Data period: {label} ({period.from} to {period.to}) · Rule version {overall.version} · Based on submitted, under-review and approved lesson records.</p></article>}
  </section>;
 }

@@ -101,6 +101,7 @@ export default function DataQualityView({
           today={today}
           onChange={setRange}
           label="Audit period"
+          mode="month"
         />
       </div>
 

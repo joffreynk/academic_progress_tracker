@@ -5,23 +5,24 @@ This project is prepared for a Cloudflare Wrangler deployment using a Cloudflare
 ## Required setup
 
 1. Install dependencies:
-   - npm install
+   - `npm install`
 2. Create the D1 database:
-   - npx wrangler d1 create student-academic-reporting-db
+   - `npx wrangler d1 create student-academic-reporting-db`
 3. Update the `database_id` value in `wrangler.jsonc` to the created database ID.
 4. Apply the schema to the D1 instance:
-   - npx wrangler d1 migrations apply student-academic-reporting-db --local
-   - npx wrangler d1 migrations apply student-academic-reporting-db --remote
+   - `npx wrangler d1 migrations apply student-academic-reporting-db --local`
+   - `npx wrangler d1 migrations apply student-academic-reporting-db --remote`
 5. Set the app runtime secret:
    - `SETUP_TOKEN` (the only runtime secret; there is no session secret to configure — sessions are random server-stored tokens)
 6. Run the app locally with Wrangler when needed:
-   - npm run wrangler:dev
+   - `npm run wrangler:dev`
 
 ## Environment variables
 
 Use these values for your deployment environment:
 
 - `SETUP_TOKEN` — one-time bootstrap token for the first admin setup
+- `TEACHER_INITIAL_PASSWORD` — optional shared starting password for newly imported teachers; unset means the built-in `school123` fallback. Set it in production.
 - `NODE_ENV=production`
 - `NEXT_TELEMETRY_DISABLED=1`
 

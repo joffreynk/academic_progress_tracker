@@ -252,6 +252,8 @@ async function main() {
   const teacherSettingsAction = await action('settings', { timezone: 'Africa/Bujumbura', excellentThreshold: 2.65, goodThreshold: 1.65, homeworkUsuallyThreshold: 0.8, punctualityOccasionallyMax: 0.1 });
   const teacherOrgAction = await action('organization', { name: 'Nope', code: 'NOP', timezone: 'Africa/Bujumbura' });
   check('teacher is denied administrator actions', [teacherAdminAction.status, teacherSettingsAction.status, teacherOrgAction.status].every((s) => s >= 400), [teacherAdminAction.status, teacherSettingsAction.status, teacherOrgAction.status]);
+  const teacherDeleteDenied = await action('deleteEntity', undefined, { type: 'class', id: teacherAssignments[0]?.classId });
+  check('teacher cannot deactivate school entities', teacherDeleteDenied.status === 403, teacherDeleteDenied.body);
   const deniedExport = await action('export', { format: 'csv' });
   check('teacher export without a class and subject is denied', deniedExport.status === 403, deniedExport.body);
   const allowedExport = await action('export', { classId: teacherAssignments[0].classId, subjectId: teacherAssignments[0].subjectId, format: 'csv' });
@@ -342,6 +344,8 @@ async function main() {
   const resolved = await action('resolveFollowUp', { id: observation.body.id, resolved: true });
   const afterResolve = await call(`/api/app?view=behaviourObservations&studentId=${target.id}&followUp=1`);
   check('follow-up can be resolved and leaves the follow-up queue', resolved.status === 200 && !(afterResolve.body.observations as any[]).some((o) => o.id === observation.body.id), afterResolve.body.observations?.length);
+  const missingResolve = await action('resolveFollowUp', { id: '00000000-0000-4000-8000-000000000000', resolved: true });
+  check('resolving a follow-up that does not exist is refused', missingResolve.status === 404, missingResolve.body);
 
   const settingsBefore = await call('/api/app?view=settings');
   const currentSettings = settingsBefore.body.settings;
@@ -373,11 +377,11 @@ async function main() {
   const adminExport = await action('export', { format: 'xlsx' });
   check('administrator export is accepted and audited', adminExport.status === 200, adminExport.body);
 
-  const grade = await action('create', undefined, { type: 'grade', data: { name: `Tmp Grade ${suffix}`, orderIndex: 99 } });
+  const grade = await action('create', undefined, { type: 'grade', data: { name: `Tmp Year ${suffix}`, orderIndex: 99 } });
   const classRow = await action('create', undefined, { type: 'class', data: { name: `TMP-${suffix}`, gradeId: '', academicYearId: activeYear.id } });
   check('grade creation succeeds and an invalid class is refused', grade.status === 200 && classRow.status >= 400, { grade: grade.body, classRow: classRow.body });
   const freshRef = await call('/api/app?view=reference');
-  const tempGrade = (freshRef.body.grades as any[]).find((g) => g.name === `Tmp Grade ${suffix}`);
+  const tempGrade = (freshRef.body.grades as any[]).find((g) => g.name === `Tmp Year ${suffix}`);
   if (tempGrade) tempRows.push({ kind: 'grade', id: tempGrade.id });
   const createdClass = await action('create', undefined, { type: 'class', data: { name: `TMP-${suffix}`, gradeId: tempGrade?.id, academicYearId: activeYear.id } });
   const badStudent = await action('create', undefined, { type: 'student', data: { studentId: `TMP-${suffix}`, firstName: 'Tmp', lastName: 'Student', gradeId: tempGrade?.id, classId: '', academicYearId: activeYear.id } });
@@ -397,6 +401,31 @@ async function main() {
   const assignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   const duplicateAssignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   check('assignment creation succeeds and duplicates are rejected', assignment.status === 200 && duplicateAssignment.status >= 400, { assignment: assignment.body, duplicate: duplicateAssignment.body });
+
+  // Reassignment via edit: old row stays but deactivated; new teacher gets an active row.
+  const refA = await call('/api/app?view=reference');
+  const originalRow = (refA.body.assignments as any[]).find((a) => a.classId === tempClass?.id && a.subjectId === tempSubject?.id && a.teacherId === teachersList[0].id);
+  const otherTeacher = teachersList.find((t: any) => t.id !== teachersList[0].id);
+  if (originalRow) tempRows.push({ kind: 'assignment', id: originalRow.id });
+  const reassignEdit = originalRow && otherTeacher
+    ? await action('updateEntity', undefined, { type: 'assignment', data: { id: originalRow.id, teacherId: otherTeacher.id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id, active: true } })
+    : { status: 500, body: 'no assignment or second teacher' };
+  const refB = await call('/api/app?view=reference');
+  const afterReassign = (refB.body.assignments as any[]).filter((a: any) => a.classId === tempClass?.id && a.subjectId === tempSubject?.id);
+  const oldAfter = afterReassign.find((a: any) => a.id === originalRow?.id);
+  const newActive = afterReassign.find((a: any) => a.teacherId === otherTeacher?.id && a.active !== false);
+  check('editing an assignment to another teacher keeps the old row deactivated and activates the new one', reassignEdit.status === 200 && oldAfter?.active === false && !!newActive && (reassignEdit.body?.reassignedFrom || []).includes(teachersList[0].name), { edit: reassignEdit.body, oldActive: oldAfter?.active, newActive: !!newActive, rows: afterReassign.map((r: any) => ({ teacher: r.teacherId, active: r.active })) });
+  if (newActive) tempRows.push({ kind: 'assignment', id: newActive.id });
+
+  // Tuple unchanged: toggling active must not error and must not create a duplicate.
+  const stableRow = afterReassign.find((a: any) => a.teacherId === otherTeacher?.id && a.active !== false) || newActive;
+  const deactivateEdit = stableRow
+    ? await action('updateEntity', undefined, { type: 'assignment', data: { id: stableRow.id, teacherId: otherTeacher?.id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id, active: false } })
+    : { status: 500, body: 'no row' };
+  const refC = await call('/api/app?view=reference');
+  const stableAfter = (refC.body.assignments as any[]).find((a: any) => a.id === stableRow?.id);
+  check('toggling an assignment inactive without changing its tuple succeeds in place', deactivateEdit.status === 200 && stableAfter?.active === false, { edit: deactivateEdit.body, active: stableAfter?.active });
+
   const renamedStudent = await action('updateEntity', undefined, { type: 'student', data: { id: tempStudent?.id, firstName: 'Tmp', lastName: 'Renamed', studentId: `TMP-${suffix}`, gradeId: tempGrade?.id, classId: tempClass?.id, academicYearId: activeYear.id, status: 'ACTIVE' } });
   const ref4 = await call('/api/app?view=reference');
   const renamed = (ref4.body.students as any[]).find((s) => s.id === tempStudent?.id);
@@ -454,6 +483,8 @@ async function main() {
   check('deactivated records are flagged inactive', deactivatedStudent?.status === 'INACTIVE' && deactivatedClass?.active === false, { student: deactivatedStudent?.status, class: deactivatedClass?.active });
   const badType = await action('deleteEntity', undefined, { type: 'year', id: tempGrade?.id });
   check('deleting an academic year through the API is not allowed', badType.status >= 400, badType.body);
+  const missingDelete = await action('deleteEntity', undefined, { type: 'student', id: '00000000-0000-4000-8000-000000000000' });
+  check('deactivating a record that does not exist is refused', missingDelete.status === 404, missingDelete.body);
   const tempAssignment = (ref7.body.assignments as any[]).find((a) => a.classId === tempClass?.id && a.subjectId === tempSubject?.id);
   if (tempAssignment) tempRows.push({ kind: 'assignment', id: tempAssignment.id });
   const removed = tempAssignment ? await action('deleteEntity', undefined, { type: 'assignment', id: tempAssignment.id }) : { status: 500, body: 'no assignment' };

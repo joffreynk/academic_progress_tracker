@@ -44,7 +44,12 @@ const LEVEL_OPTIONS: Record<'performance' | 'participation' | 'homework' | 'cond
   conduct: conductLevels,
 };
 
-const clampSessions = (v: string) => Math.min(400, Math.max(1, Math.round(Number(v) || 0) || 1));
+const clampSessions = (v: string) => {
+  if (v === '' || v === null || v === undefined) return '';
+  const n = Number(v);
+  if (Number.isNaN(n)) return '';
+  return Math.min(400, Math.max(1, Math.round(n)));
+};
 
 function StatusBadge({ status }: { status: string }) {
   return <span className={`badge badge-${status.toLowerCase().replace(/_/g, '-')}`}>{STATUS_LABEL[status] || status}</span>;
@@ -76,7 +81,7 @@ export default function MonthlyEntryView({
   const [checklist, setChecklist] = useState<Checklist | null>(null);
   const [form, setForm] = useState<FormPayload | null>(null);
   const [rows, setRows] = useState<Record<string, Row>>({});
-  const [sessionsHeld, setSessionsHeld] = useState(20);
+  const [sessionsHeld, setSessionsHeld] = useState<string | number>('');
   const [topics, setTopics] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -84,7 +89,7 @@ export default function MonthlyEntryView({
   const [notice, setLocalNotice] = useState<string | null>(null);
   const [rosterEditor, setRosterEditor] = useState<{ students: RosterOption[]; selected: string[]; search: string; saving: boolean } | null>(null);
 
-  const minMonth = `${Number(today.slice(0, 4)) - 3}${today.slice(4)}`;
+  const minMonth = `${Number(today.slice(0, 4)) - 3}-${today.slice(5, 7)}`;
   const editable = !!form?.editable && !form?.monthClosed;
 
   const showToast = (message: string) => {
@@ -130,7 +135,7 @@ export default function MonthlyEntryView({
     }
     setForm(d);
     setRows(map);
-    setSessionsHeld(d.entry?.sessionsHeld ?? 20);
+    setSessionsHeld(d.entry?.sessionsHeld ?? '');
     setTopics(d.entry?.topics ?? '');
   };
 
@@ -244,16 +249,19 @@ export default function MonthlyEntryView({
       }
     });
 
-  const buildPayload = (submit: boolean) => ({
-    id: form?.entry?.id || undefined,
-    month,
-    classId,
-    subjectId,
-    sessionsHeld: Math.min(400, Math.max(1, Math.round(sessionsHeld) || 20)),
-    topics,
-    submit,
-    records: roster.map((s) => ({ studentId: s.studentId, ...rows[s.studentId] })),
-  });
+  const buildPayload = (submit: boolean) => {
+    const sessionsHeldValue = sessionsHeld === '' ? undefined : Math.min(400, Math.max(1, Math.round(Number(sessionsHeld) || 20)));
+    return {
+      id: form?.entry?.id || undefined,
+      month,
+      classId,
+      subjectId,
+      sessionsHeld: sessionsHeldValue,
+      topics,
+      submit,
+      records: roster.map((s) => ({ studentId: s.studentId, ...rows[s.studentId] })),
+    };
+  };
 
   const doSave = (submit: boolean) =>
     run(async () => {
@@ -390,27 +398,39 @@ export default function MonthlyEntryView({
         {checklistRows.length === 0 ? (
           <div className="empty"><div className="empty-title">No assignments</div><div className="empty-detail">No class and subject combinations are assigned for this month.</div></div>
         ) : (
-          <div className="table-scroll" style={{ maxHeight: 260 }}>
-            <table>
-              <thead>
-                <tr><th>Class</th><th>Subject</th><th>Teacher</th><th>Students</th><th>Status</th></tr>
-              </thead>
-              <tbody>
-                {checklistRows.map((item) => (
-                  <tr
-                    key={`${item.classId}|${item.subjectId}`}
-                    style={{ cursor: 'pointer', background: item.classId === classId && item.subjectId === subjectId ? '#f0fdfa' : undefined }}
-                    onClick={() => openItem(item)}
-                  >
-                    <td><strong>{item.className}</strong></td>
-                    <td>{item.subjectName}</td>
-                    <td>{item.teacherName}</td>
-                    <td>{item.kind === 'entry' ? item.studentCount ?? '—' : '—'}</td>
-                    <td><StatusBadge status={item.status} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
+            {checklistRows.map((item) => (
+              <div
+                key={`${item.classId}|${item.subjectId}`}
+                style={{
+                  border: '1px solid #e8edf0',
+                  borderRadius: 9,
+                  padding: 12,
+                  cursor: 'pointer',
+                  background: item.classId === classId && item.subjectId === subjectId ? '#f0fdfa' : '#fff',
+                  transition: 'box-shadow .15s, border-color .15s',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                }}
+                onClick={() => openItem(item)}
+                onMouseEnter={(e) => { e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,.08)'; e.currentTarget.style.borderColor = '#d0e7e2'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.boxShadow = ''; e.currentTarget.style.borderColor = '#e8edf0'; }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <strong style={{ fontSize: 13 }}>{item.className}</strong>
+                    <div style={{ fontSize: 12, color: '#748792', marginTop: 2 }}>{item.subjectName}</div>
+                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 1 }}>{item.teacherName}</div>
+                  </div>
+                  <StatusBadge status={item.status} />
+                </div>
+                <div style={{ fontSize: 11, color: '#748792', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                  <span>{item.kind === 'entry' ? item.studentCount ?? '—' : '—'} students</span>
+                  <span>{item.kind === 'entry' ? 'Record exists' : 'Not started'}</span>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>

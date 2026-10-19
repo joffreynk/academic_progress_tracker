@@ -1,7 +1,7 @@
 'use client';
 import { useMemo } from 'react';
 import { CalendarDays, LockKeyhole, TriangleAlert } from 'lucide-react';
-import { buildPeriod, daysInPeriod, monthLabelShort, periodPresets, MAX_PERIOD_MONTHS } from '@/lib/period';
+import { buildPeriod, daysInPeriod, monthLabelShort, periodPresets, MAX_PERIOD_MONTHS, monthStart, monthEnd, isMonthKey } from '@/lib/period';
 
 export default function PeriodPicker({
   from,
@@ -12,6 +12,7 @@ export default function PeriodPicker({
   months,
   closedMonths = [],
   showCoverage = true,
+  mode = 'date',
 }: {
   from: string;
   to: string;
@@ -21,6 +22,7 @@ export default function PeriodPicker({
   months?: string[];
   closedMonths?: string[];
   showCoverage?: boolean;
+  mode?: 'date' | 'month';
 }) {
   const presets = useMemo(() => periodPresets(today), [today]);
   const period = useMemo(() => buildPeriod(from, to), [from, to]);
@@ -28,6 +30,28 @@ export default function PeriodPicker({
   const covered = months && months.length ? months : period?.months;
   const activePreset = presets.find((p) => p.from === from && p.to === to);
   const trimmed = Boolean(from || to);
+  const isMonthMode = mode === 'month';
+
+  // Convert YYYY-MM-DD to YYYY-MM for month input display
+  const fromValue = isMonthMode && from ? from.slice(0, 7) : from;
+  const toValue = isMonthMode && to ? to.slice(0, 7) : to;
+
+  // Convert month input (YYYY-MM) to date range (YYYY-MM-DD)
+  const handleFromChange = (value: string) => {
+    if (isMonthMode && isMonthKey(value)) {
+      onChange({ from: monthStart(value), to });
+    } else {
+      onChange({ from: value, to });
+    }
+  };
+
+  const handleToChange = (value: string) => {
+    if (isMonthMode && isMonthKey(value)) {
+      onChange({ from, to: monthEnd(value) });
+    } else {
+      onChange({ from, to: value });
+    }
+  };
 
   return (
     <div className="period-picker">
@@ -63,11 +87,11 @@ export default function PeriodPicker({
       <div className="period-inputs">
         <label>
           From
-          <input type="date" value={from} onChange={(e) => onChange({ from: e.target.value, to })} />
+          <input type={isMonthMode ? 'month' : 'date'} value={fromValue} onChange={(e) => handleFromChange(e.target.value)} />
         </label>
         <label>
           To
-          <input type="date" value={to} onChange={(e) => onChange({ from, to: e.target.value })} />
+          <input type={isMonthMode ? 'month' : 'date'} value={toValue} onChange={(e) => handleToChange(e.target.value)} />
         </label>
       </div>
 

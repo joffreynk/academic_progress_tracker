@@ -150,7 +150,7 @@ async function main() {
 
   const [grade7] = await db.insert(grades).values({
     organizationId: org.id,
-    name: 'Grade 7',
+    name: 'Year 7',
     orderIndex: 7,
     active: true,
   }).returning();

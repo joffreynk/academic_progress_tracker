@@ -83,7 +83,7 @@ export const monthlyEntryInput = z.object({
   month: z.string().regex(MONTH_PATTERN, 'Month must be in YYYY-MM format.'),
   classId: z.string().min(1),
   subjectId: z.string().min(1),
-  sessionsHeld: z.number().int().min(1).max(400),
+  sessionsHeld: z.number().int().min(1).max(400).default(20),
   topics: z.string().max(500),
   submit: z.boolean(),
   records: z.array(monthlyStudentInput).max(150),

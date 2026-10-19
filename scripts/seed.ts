@@ -13,7 +13,7 @@ async function main(){
  const [org]=await db.insert(organizations).values({name:'Demo International School',code:'DEMO',timezone:'Africa/Bujumbura'}).returning();await db.insert(settings).values({organizationId:org.id});
  const passwordHash=await hash(password,12);
  const [admin]=await db.insert(users).values({organizationId:org.id,name:'Amara Niyonkuru',email:'admin@demo.school',username:'demo.admin',passwordHash,role:'ADMIN'}).returning();await db.update(organizations).set({primaryAdminUserId:admin.id}).where(eq(organizations.id,org.id));
- const gradeRows=await db.insert(grades).values(Array.from({length:13},(_,i)=>({organizationId:org.id,name:`Grade ${i+1}`,orderIndex:i+1}))).returning();
+  const gradeRows=await db.insert(grades).values(Array.from({length:13},(_,i)=>({organizationId:org.id,name:`Year ${i+1}`,orderIndex:i+1}))).returning();
  const [year]=await db.insert(academicYears).values({organizationId:org.id,name:'2026-2027',startDate:'2026-08-01',endDate:'2027-07-31'}).returning();
  const termRows=await db.insert(terms).values([{organizationId:org.id,academicYearId:year.id,name:'Term 1',startDate:'2026-08-01',endDate:'2026-12-20'},{organizationId:org.id,academicYearId:year.id,name:'Term 2',startDate:'2027-01-05',endDate:'2027-03-31'},{organizationId:org.id,academicYearId:year.id,name:'Term 3',startDate:'2027-04-01',endDate:'2027-07-31'}]).returning();
  const cls=await db.insert(classes).values(['7A','7B','8A','8B','9A','10B','11A'].map(n=>({organizationId:org.id,name:n,gradeId:gradeRows[Number.parseInt(n)-1].id,academicYearId:year.id}))).returning();

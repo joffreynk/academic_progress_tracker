@@ -55,7 +55,7 @@ export const loginAttempts = sqliteTable('login_attempts', {
   updatedAt: updated(),
 });
 
-// §15 grades – Grade 1 through 13
+// §15 grades – Year 1 through 13
 export const grades = sqliteTable('grades', {
   id: id(),
   organizationId: text('organization_id').notNull().references(() => organizations.id),
