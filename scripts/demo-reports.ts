@@ -79,6 +79,10 @@ async function main() {
     student: { id: 's1', name: 'Ali Kamberis', code: 'STU-010', className: '8B' },
     subjects, overall, comparable: groupReportsByMonth(studentRows, RULES), overallMonths: summarizeByMonth(studentRows, RULES),
     raw: studentRows, rules: RULES,
+    clubs: [
+      { clubName: 'Robotics Club', activities: 3, months: ['2026-10'], latest: { title: 'Community demo day', month: '2026-10', performance: 'GOOD', comment: 'Helped two teammates debug.' } },
+      { clubName: 'Debate Society', activities: 0, months: [], latest: null },
+    ],
   });
   fs.writeFileSync(path.join(OUT, '01-student-report-subjects.pdf'), Buffer.from(student.doc.output('arraybuffer') as ArrayBuffer));
   written.push('01-student-report-subjects.pdf');

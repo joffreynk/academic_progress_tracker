@@ -251,35 +251,45 @@ class PdfWriter {
   }
 
   /** Row of KPI boxes: uppercase label, bold value, small supporting line. */
-  kpiStrip(items: { label: string; value: string; sub?: string; tone?: Color }[]) {
+  /** A card is a header plus its mix. When a verdict would only repeat a category already listed below it,
+   *  the shares themselves become the body and nothing is printed above them. */
+  kpiStrip(items: { label: string; value?: string; sub?: string; tone?: Color }[]) {
     if (!items.length) return;
     const gap = 6;
-    const subSize = 6;
-    const subLineH = 7.5;
-    const subTop = 31;
-    const maxSubLines = 4;
+    const maxLines = 5;
     const boxWidth = (this.content - gap * (items.length - 1)) / items.length;
     const inner = boxWidth - 12;
-    // The supporting counts wrap instead of being ellipsised, so every category stays readable.
-    const subs = items.map((item) => (item.sub ? this.clip(item.sub, subSize, inner, maxSubLines) : ''));
-    const subLines = Math.max(1, ...subs.map((sub) => (sub ? this.wrap(sub, subSize, inner).length : 1)));
-    const height = subTop + (subLines - 1) * subLineH + 3;
+    const plans = items.map((item) => {
+      // A headline card keeps its small supporting line; a shares-only card gives the mix more room.
+      const size = item.value ? 6 : 7.5;
+      const lineH = item.value ? 7.5 : 9.5;
+      const bodyTop = item.value ? 31 : 24;
+      const body = item.sub ? this.clip(item.sub, size, inner, maxLines) : '';
+      return { item, size, lineH, bodyTop, body, lines: body ? this.wrap(body, size, inner).length : 0 };
+    });
+    const height = Math.max(...plans.map((p) => p.bodyTop + Math.max(0, p.lines - 1) * p.lineH)) + 4;
     this.need(height + 8);
     const top = this.y;
-    items.forEach((item, i) => {
+    plans.forEach((p, i) => {
+      const item = p.item;
       const x = this.margin + i * (boxWidth + gap);
       this.doc.setFillColor(...ZEBRA);
       this.doc.setDrawColor(...RULE);
       this.doc.setLineWidth(0.4);
       this.doc.roundedRect(x, top, boxWidth, height, 2.5, 2.5, 'FD');
-      this.doc.setFont('helvetica', 'normal'); this.doc.setFontSize(subSize); this.doc.setTextColor(...MUTED);
-      this.doc.text(clipLine(this.doc, item.label.toUpperCase(), subSize, inner), x + 6, top + 10);
-      this.doc.setFont('helvetica', 'bold'); this.doc.setFontSize(10); this.doc.setTextColor(...(item.tone ?? INK));
-      this.doc.text(clipLine(this.doc, item.value, 10, inner), x + 6, top + 22);
-      const sub = subs[i];
-      if (sub) {
-        this.doc.setFont('helvetica', 'normal'); this.doc.setFontSize(subSize); this.doc.setTextColor(...MUTED);
-        this.wrap(sub, subSize, inner).forEach((line, index) => { this.doc.text(line, x + 6, top + subTop + index * subLineH); });
+      this.doc.setFont('helvetica', 'normal'); this.doc.setFontSize(6); this.doc.setTextColor(...MUTED);
+      this.doc.text(clipLine(this.doc, item.label.toUpperCase(), 6, inner), x + 6, top + 10);
+      if (item.value) {
+        this.doc.setFont('helvetica', 'bold'); this.doc.setFontSize(10); this.doc.setTextColor(...(item.tone ?? INK));
+        this.doc.text(clipLine(this.doc, item.value, 10, inner), x + 6, top + 22);
+      }
+      if (p.lines) {
+        this.doc.setFont('helvetica', 'normal'); this.doc.setFontSize(p.size);
+        this.wrap(p.body, p.size, inner).forEach((line, index) => {
+          // With no verdict above it, the leading share takes the card's colour so the level still reads.
+          this.doc.setTextColor(...(index === 0 && !item.value ? (item.tone ?? MUTED) : MUTED));
+          this.doc.text(line, x + 6, top + p.bodyTop + index * p.lineH);
+        });
       }
     });
     this.y = top + height + 8;
@@ -574,10 +584,10 @@ export async function buildStudentPdf(input: {
   ]);
 
   w.kpiStrip([
-    { label: 'Performance', value: pretty(overall.performanceResult), sub: percentText(overall.performance), tone: toneFor(overall.performanceResult) },
-    { label: 'Punctuality', value: overall.punctualityResult, sub: percentText(overall.punctuality), tone: toneFor(overall.punctualityResult) },
-    { label: 'Homework', value: overall.homeworkResult, sub: percentText(overall.homework), tone: toneFor(overall.homeworkResult) },
-    { label: 'Conduct', value: pretty(overall.conductResult), sub: percentText(overall.conduct), tone: toneFor(overall.conductResult) },
+    { label: 'Performance', sub: percentText(overall.performance), tone: toneFor(overall.performanceResult) },
+    { label: 'Punctuality', sub: percentText(overall.punctuality), tone: toneFor(overall.punctualityResult) },
+    { label: 'Homework', sub: percentText(overall.homework), tone: toneFor(overall.homeworkResult) },
+    { label: 'Conduct', sub: percentText(overall.conduct), tone: toneFor(overall.conductResult) },
   ]);
 
   let sectionNo = 1;
@@ -617,10 +627,10 @@ export async function buildStudentPdf(input: {
 
   w.sectionCompact(`${sectionNo++}. Punctuality & discipline`);
   w.facts([
-    { label: 'Punctuality', value: `${overall.punctualityResult} — ${percentText(overall.punctuality)}` },
-    { label: 'Homework', value: `${overall.homeworkResult} — ${percentText(overall.homework)}` },
-    { label: 'Participation', value: `${pretty(overall.participationResult)} — ${percentText(overall.participation)}` },
-    { label: 'Conduct', value: `${pretty(overall.conductResult)} — ${percentText(overall.conduct)}` },
+    { label: 'Punctuality', value: percentText(overall.punctuality) },
+    { label: 'Homework', value: percentText(overall.homework) },
+    { label: 'Participation', value: percentText(overall.participation) },
+    { label: 'Conduct', value: percentText(overall.conduct) },
     { label: 'Recorded', value: `${overall.lessons} lesson report${overall.lessons === 1 ? '' : 's'} in the period` },
   ], { size: 7.5, labelSize: 6, labelWidth: 84, lineH: 10, gap: 4 });
 
@@ -743,16 +753,14 @@ export async function buildClassSummaryPdf(input: {
     return acc;
   }, { lessons: 0, performance: {} as Record<string, number>, punctuality: {} as Record<string, number> });
   const students = new Set(summaries.map((s) => s.studentId)).size;
-  const puncTotal = Object.values(totals.punctuality).reduce((a, b) => a + b, 0);
-  const puncOnTime = (totals.punctuality.ALWAYS_ON_TIME || 0) + (totals.punctuality.USUALLY_ON_TIME || 0);
 
   w.facts([
     { label: 'Reporting period', value: `${periodLabel(period)} (${period.from} to ${period.to})` },
     { label: 'Students covered', value: `${students} student${students === 1 ? '' : 's'}` },
     { label: 'Subject rows', value: `${summaries.length} student-subject summar${summaries.length === 1 ? 'y' : 'ies'}` },
     { label: 'Recorded lessons', value: `${totals.lessons} lesson report${totals.lessons === 1 ? '' : 's'}` },
-    { label: 'Punctuality', value: puncTotal ? `${Math.round((puncOnTime / puncTotal) * 100)}% on time · ${percentText(totals.punctuality)}` : 'No data' },
-    { label: 'Performance mix', value: percentText(totals.performance) },
+    { label: 'Punctuality', value: percentText(totals.punctuality) },
+    { label: 'Performance', value: percentText(totals.performance) },
   ]);
 
   w.section('1. Student subject summary', 'Every recorded student-subject combination in the selected period.');
@@ -870,6 +878,7 @@ export async function buildClubStudentReport(input: {
     rows.forEach((r) => { const v = r[key]; if (v) acc[v] = (acc[v] || 0) + 1; });
     return acc;
   };
+
   const topValue = (acc: Record<string, number>) => {
     const entry = Object.entries(acc).sort((a, b) => b[1] - a[1])[0];
     return entry ? pretty(entry[0]) : 'No data';
@@ -878,18 +887,18 @@ export async function buildClubStudentReport(input: {
   const activityCard = { label: 'Activities recorded', value: `${rows.length}/${activitiesTotal ?? rows.length}`, sub: rows.length ? 'entries with a record' : 'no rows yet' };
   w.kpiStrip(subjectProfile ? [
     activityCard,
-    // Two lines per criterion: the headline result, then every rating as a share of the
-    // child's ratings across all subjects (10 ratings → 5 Needs Improvement = 50%).
-    { label: 'Performance', value: subjectProfile.performanceResult, sub: percentText(subjectProfile.performance), tone: toneFor(subjectProfile.performanceResult) },
-    { label: 'Punctuality', value: subjectProfile.punctualityResult, sub: percentText(subjectProfile.punctuality), tone: toneFor(subjectProfile.punctualityResult) },
-    { label: 'Homework', value: subjectProfile.homeworkResult, sub: percentText(subjectProfile.homework), tone: toneFor(subjectProfile.homeworkResult) },
-    { label: 'Conduct', value: subjectProfile.conductResult, sub: percentText(subjectProfile.conduct), tone: toneFor(subjectProfile.conductResult) },
+    // One header and the shares themselves: every rating as a share of the child's ratings
+    // across all subjects (10 ratings → 5 Needs Improvement = 50%), no verdict repeated above them.
+    { label: 'Performance', sub: percentText(subjectProfile.performance), tone: toneFor(subjectProfile.performanceResult) },
+    { label: 'Punctuality', sub: percentText(subjectProfile.punctuality), tone: toneFor(subjectProfile.punctualityResult) },
+    { label: 'Homework', sub: percentText(subjectProfile.homework), tone: toneFor(subjectProfile.homeworkResult) },
+    { label: 'Conduct', sub: percentText(subjectProfile.conduct), tone: toneFor(subjectProfile.conductResult) },
   ] : [
     activityCard,
-    { label: 'Punctuality', value: topValue(tally('punctuality')), sub: percentText(tally('punctuality')), tone: toneFor(topValue(tally('punctuality'))) },
-    { label: 'Performance', value: topValue(tally('performance')), sub: percentText(tally('performance')), tone: toneFor(topValue(tally('performance'))) },
-    { label: 'Participation', value: topValue(tally('participation')), sub: percentText(tally('participation')), tone: toneFor(topValue(tally('participation'))) },
-    { label: 'Conduct', value: topValue(tally('conduct')), sub: percentText(tally('conduct')), tone: toneFor(topValue(tally('conduct'))) },
+    { label: 'Punctuality', sub: percentText(tally('punctuality')), tone: toneFor(topValue(tally('punctuality'))) },
+    { label: 'Performance', sub: percentText(tally('performance')), tone: toneFor(topValue(tally('performance'))) },
+    { label: 'Participation', sub: percentText(tally('participation')), tone: toneFor(topValue(tally('participation'))) },
+    { label: 'Conduct', sub: percentText(tally('conduct')), tone: toneFor(topValue(tally('conduct'))) },
   ]);
 
   w.section('1. Activity record', 'One row per club activity for this student, with the month it was recorded in.');
