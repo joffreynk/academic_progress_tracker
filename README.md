@@ -149,28 +149,30 @@ There is no PostgreSQL/MySQL dependency. Schema lives in `src/db/schema.ts`, gen
 
 - Apply migrations locally: `npm run db:migrate` (drizzle-kit → `DATABASE_URL`).
 - Apply migrations to D1: `npx wrangler d1 migrations apply student-academic-reporting-db --remote`.
-- Migration status: `0003` adds the club tables (`clubs`, `club_teachers`, `club_members`, `club_activities`) and drops `teachers.department`; `0004` adds `monthly_entries` and `monthly_student_entries` (§193); `0005` adds `club_activity_records` (per-student club activity rows); `0006` renames `daily_lessons` → `monthly_lessons` and `daily_student_records` → `monthly_student_records` (column `daily_lesson_id` → `monthly_lesson_id`), renames the audit entity `daily_lesson` → `monthly_lesson` and drops `settings.reportingCadence`; `0007` adds `subject_students` (teacher-managed subject rosters). `0005`, `0006` and `0007` are applied to the local SQLite database only — run the remote D1 apply before deploying code that expects them.
+- Migration status: `0003` adds the club tables (`clubs`, `club_teachers`, `club_members`, `club_activities`) and drops `teachers.department`; `0004` adds `monthly_entries` and `monthly_student_entries` (§193); `0005` adds `club_activity_records` (per-student club activity rows); `0006` renames `daily_lessons` → `monthly_lessons` and `daily_student_records` → `monthly_student_records` (column `daily_lesson_id` → `monthly_lesson_id`), renames the audit entity `daily_lesson` → `monthly_lesson` and drops `settings.reportingCadence`; `0007` adds `subject_students` (teacher-managed subject rosters). Migrations `0000`–`0007` are applied **both** locally and to the remote D1 database — check with `npx wrangler d1 migrations list student-academic-reporting-db --remote` (expect *No migrations to apply*). When you add a new migration, apply it to remote before deploying the build that expects it, so code and schema move together.
 - Optional demo data (local only): `npm run db:seed`.
 - Remove recorded legacy lesson data (local only): `npm run db:clear-records` — deletes `monthly_student_records` and `monthly_lessons`, keeping schools, users, classes, teachers, students, assignments and monthly records. Use `npx tsx scripts/clear-recorded-data.ts --dry-run` to preview the counts and `npx tsx scripts/clear-recorded-data.ts --sql` to print the statements for `npx wrangler d1 execute student-academic-reporting-db --remote --file clear-recorded-data.sql` when cleaning the deployed database.
 - Back up a local database by copying `.data/local.db`; it is ignored by Git.
 
 ## Deployment
 
-The app builds for Cloudflare Workers with OpenNext + Wrangler (`wrangler.jsonc`, main `.open-next/worker.js`, assets in `.open-next/assets`).
+The runbook lives in [`deployment.md`](./deployment.md) — required setup, the **Verify before deploying** checklist, environment variables and rollback. Summary:
+
+The app builds for Cloudflare Workers with OpenNext + Wrangler (`wrangler.jsonc`, main `.open-next/worker.js`, assets in `.open-next/assets`). The D1 `database_id` is already set to `student-academic-reporting-db` and all migrations `0000`–`0007` are applied remotely.
 
 1. `npm install`
-2. `npm run build` — runs `next build` and then `npx @opennextjs/cloudflare build`.
-3. `npx wrangler login` (first time).
-4. `npm run db:migrate`, then `npx wrangler d1 migrations apply student-academic-reporting-db --remote` (first deploy and after every migration).
-5. `npm run wrangler:deploy` — pushes the worker and assets to Cloudflare.
-6. Local rehearsal of the production bundle: `npm run wrangler:dev`.
+2. `npx wrangler login` (first time).
+3. Walk the **Verify before deploying** checklist in `deployment.md`: `drizzle-kit generate` (no changes), remote migrations current, `SETUP_TOKEN` secret present, tests + smoke suites green, build succeeds, `wrangler deploy --dry-run` passes.
+4. `npm run wrangler:deploy` — rebuilds and pushes the worker and assets to Cloudflare.
+5. `npx wrangler deployments list --name student` to confirm the new version.
+6. Local rehearsal of the production bundle: `npm run wrangler:dev` (needs `npx wrangler d1 migrations apply student-academic-reporting-db --local` once).
 
 After deployment open `/` and complete **First-time setup** with `SETUP_TOKEN` to create the first super administrator. In production set a strong `SETUP_TOKEN` and `DATABASE_URL` only for local use; the D1 binding supplies the database.
 
 Deployment notes:
 - `.open-next/` and `.wrangler/` are build output — do not edit them by hand. They are ignored by Git (previously tracked `.open-next/` files were removed from the index), so always run `npm run build` immediately before `wrangler deploy` and never rely on the repository to hold a bundle.
-- Apply migrations to the remote database before the deploy that needs them: `npx wrangler d1 migrations apply student-academic-reporting-db --remote` (migration `0003` ships club tables and the `teachers.department` drop, `0004` the monthly record tables, `0005` the club activity records, `0006` the daily→monthly table rename and the cadence flag removal, `0007` the subject roster tables) — code and schema move together.
-- Set secrets per environment with `npx wrangler secret put SETUP_TOKEN` (the worker has no `SETUP_TOKEN` until this is done, and first-time setup stays disabled).
+- Apply migrations to the remote database before the deploy that needs them: `npx wrangler d1 migrations apply student-academic-reporting-db --remote` — code and schema move together (the migration list is in the *Database* section above; all are currently applied remotely).
+- Set secrets per environment with `npx wrangler secret put SETUP_TOKEN` (`SETUP_TOKEN` is already set on the `student` worker; without it, first-time setup stays disabled). `TEACHER_INITIAL_PASSWORD` is intentionally **not** set, so imported teachers start on the built-in `school123` — see `deployment.md`.
 - The app reads the D1 binding from the Cloudflare request context at runtime; without it (for example in a plain Node server) it falls back to `DATABASE_URL`.
 
 
