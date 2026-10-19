@@ -8,6 +8,7 @@ import { groupReports, summarize, summarizeByMonth, groupReportsByMonth, type Ob
 const RULES: Rules = { version: 2, excellentThreshold: 2.65, goodThreshold: 1.65, homeworkUsuallyThreshold: 0.8, punctualityOccasionallyMax: 0.1 };
 const OUT = path.resolve(process.cwd(), 'demo');
 
+/** Every text-showing string, in draw order — wrapping only inserts line breaks between them. */
 function pdfStrings(buf: Buffer): string {
   const out: string[] = [];
   let index = buf.indexOf('stream');
@@ -18,10 +19,14 @@ function pdfStrings(buf: Buffer): string {
     const end = buf.indexOf('endstream', start);
     if (end === -1) break;
     const chunk = buf.subarray(start, end);
-    try { out.push(inflateSync(chunk).toString('latin1')); } catch { out.push(chunk.toString('latin1')); }
+    let raw = '';
+    try { raw = inflateSync(chunk).toString('latin1'); } catch { raw = chunk.toString('latin1'); }
+    const re = /\(((?:[^()\\]|\\.)*)\)/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(raw))) out.push(match[1].replace(/\\([()\\])/g, '$1'));
     index = buf.indexOf('stream', end + 9);
   }
-  return out.join('\n').replace(/\((?:[^()\\]|\\.)*\)/g, (m) => m.slice(1, -1).replace(/\\([()\\])/g, '$1'));
+  return out.join(' ');
 }
 
 /** 10 subjects: 5 Needs Improvement, 3 Good, 2 Excellent -> 50% / 30% / 20%. */
@@ -117,9 +122,8 @@ async function main() {
 
   for (const name of written) {
     const text = pdfStrings(fs.readFileSync(path.join(OUT, name)));
-    const lines = text.split(/\s{2,}|\n/).map((l) => l.trim()).filter((l) => /%/.test(l));
     console.log(`\n=== ${name} ===`);
-    for (const l of lines.slice(0, 8)) console.log(`  ${l.slice(0, 200)}`);
+    for (const line of text.match(/.{1,110}(?:\s|$)/g) ?? []) console.log(`  ${line.trimEnd()}`);
   }
   console.log(`\nWrote ${written.length} demo PDFs to ${OUT}`);
 }
