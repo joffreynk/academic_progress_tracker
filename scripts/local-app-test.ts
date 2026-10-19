@@ -18,7 +18,7 @@ const lessonIds: string[] = [];
 const observationIds: string[] = [];
 const tempOrg: { id?: string; usernames: string[] } = { usernames: [] };
 const tempTeacher: { id?: string; username?: string } = {};
-type TempKind = 'grade' | 'class' | 'subject' | 'student' | 'year' | 'term' | 'assignment';
+type TempKind = 'grade' | 'class' | 'subject' | 'student' | 'teacher' | 'year' | 'term' | 'assignment';
 const tempRows: { kind: TempKind; id: string }[] = [];
 const tempClosure: { month?: string; created: boolean } = { created: false };
 
@@ -86,6 +86,7 @@ async function cleanup() {
   await safe('temp subjects', async () => { const ids = pick('subject'); if (ids.length) await db.delete(subjects).where(inArray(subjects.id, ids)); });
   await safe('temp years', async () => { const ids = pick('year'); if (ids.length) await db.delete(academicYears).where(inArray(academicYears.id, ids)); });
   await safe('temp teacher', async () => { if (tempTeacher.id) await db.delete(teachers).where(eq(teachers.id, tempTeacher.id)); });
+  await safe('temp teachers', async () => { const ids = pick('teacher'); if (ids.length) await db.delete(teachers).where(inArray(teachers.id, ids)); });
   await safe('temp users', async () => {
     const byName = await db.select({ id: users.id }).from(users).where(like(users.username, 'tmp%'));
     const byOrg = tempOrg.id ? await db.select({ id: users.id }).from(users).where(eq(users.organizationId, tempOrg.id)) : [];
@@ -398,6 +399,27 @@ async function main() {
   const ref3 = await call('/api/app?view=reference');
   const tempStudent = (ref3.body.students as any[]).find((s) => s.studentId === `TMP-${suffix}`);
   if (tempStudent) tempRows.push({ kind: 'student', id: tempStudent.id });
+
+  // Person IDs are assigned by the server: nothing is typed in, the next number is taken.
+  const knownStudentIds = (ref3.body.students as any[]).map((s) => String(s.studentId));
+  const tailOf = (value: unknown) => Number(/(\d+)$/.exec(String(value ?? '').trim())?.[1]);
+  const autoFirst = await action('create', undefined, { type: 'student', data: { firstName: 'Auto', lastName: `Seq${suffix}`, gradeId: tempGrade?.id, classId: tempClass?.id, academicYearId: activeYear.id } });
+  const afterFirst = await call('/api/app?view=reference');
+  const autoFirstRow = (afterFirst.body.students as any[]).find((s) => s.fullName === `Auto Seq${suffix}`);
+  if (autoFirstRow) tempRows.push({ kind: 'student', id: autoFirstRow.id });
+  const autoSecond = await action('create', undefined, { type: 'student', data: { firstName: 'Auto', lastName: `Seq2${suffix}`, gradeId: tempGrade?.id, classId: tempClass?.id, academicYearId: activeYear.id } });
+  const afterSecond = await call('/api/app?view=reference');
+  const autoSecondRow = (afterSecond.body.students as any[]).find((s) => s.fullName === `Auto Seq2${suffix}`);
+  if (autoSecondRow) tempRows.push({ kind: 'student', id: autoSecondRow.id });
+  const firstCode = String(autoFirstRow?.studentId ?? '');
+  check('student ID is generated when none is entered', autoFirst.status === 200 && !!autoFirstRow && /\d+$/.test(firstCode) && !knownStudentIds.includes(firstCode), { auto: autoFirst.body, studentId: firstCode });
+  check('consecutive student IDs take the next number', autoSecond.status === 200 && Number.isFinite(tailOf(firstCode)) && tailOf(autoSecondRow?.studentId) === tailOf(firstCode) + 1, { first: firstCode, second: autoSecondRow?.studentId });
+
+  const autoTeacher = await action('create', undefined, { type: 'teacher', data: { name: `Auto Teacher ${suffix}`, email: `auto.${suffix}@school.test`, username: `tmpauto.${suffix}`, password: 'TempPass1!' } });
+  const afterTeacher = await call('/api/app?view=reference');
+  const autoTeacherRow = (afterTeacher.body.teachers as any[]).find((t) => t.name === `Auto Teacher ${suffix}`);
+  if (autoTeacherRow) tempRows.push({ kind: 'teacher', id: autoTeacherRow.id });
+  check('teacher ID is generated when none is entered', autoTeacher.status === 200 && !!autoTeacherRow && /\d+$/.test(String(autoTeacherRow.teacherId || '')), { auto: autoTeacher.body, teacherId: autoTeacherRow?.teacherId });
   const assignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   const duplicateAssignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   check('assignment creation succeeds and duplicates are rejected', assignment.status === 200 && duplicateAssignment.status >= 400, { assignment: assignment.body, duplicate: duplicateAssignment.body });

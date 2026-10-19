@@ -225,6 +225,13 @@ const entityLabel = (type: string) => (type === 'year' ? 'Academic Year' : type 
 
 const entityPlural = (type: string) => (type === 'class' ? 'Classes' : type === 'year' ? 'Academic Years' : `${entityLabel(type)}s`);
 
+/** A level stored as `Grade 6` or `Year 7` is shown as just the level: `Year: 6`. */
+const yearLevel = (name?: string | null) => {
+  const raw = String(name ?? '').trim();
+  const level = raw.replace(/^(grade|year|level)[\s-]*/i, '').trim();
+  return level || raw || '—';
+};
+
 const fieldMap: Record<string, { key: string; label: string; type?: string; options?: string; placeholder?: string }[]> = {
   year: [
     { key: 'name', label: 'Academic year', placeholder: '2026-2027' },
@@ -251,7 +258,6 @@ const fieldMap: Record<string, { key: string; label: string; type?: string; opti
     { key: 'code', label: 'Subject code', placeholder: 'MATH' },
   ],
   teacher: [
-    { key: 'teacherId', label: 'Teacher ID' },
     { key: 'name', label: 'Full name' },
     { key: 'email', label: 'Email', type: 'email' },
     { key: 'username', label: 'Login username' },
@@ -264,7 +270,6 @@ const fieldMap: Record<string, { key: string; label: string; type?: string; opti
     { key: 'academicYearId', label: 'Academic year', options: 'years' },
   ],
   student: [
-    { key: 'studentId', label: 'Student ID' },
     { key: 'firstName', label: 'First name' },
     { key: 'lastName', label: 'Last name' },
     { key: 'gradeId', label: 'Year', options: 'grades' },
@@ -1012,7 +1017,6 @@ export default function Home() {
       fields = [
         { key: 'firstName', label: 'First Name', value: item.firstName || item.fullName.split(' ')[0] },
         { key: 'lastName', label: 'Last Name', value: item.lastName || item.fullName.split(' ').slice(1).join(' ') },
-        { key: 'studentId', label: 'Student ID', value: item.studentId },
         { key: 'classId', label: 'Class', value: item.classId, options: ref?.classes.map((c) => ({ label: c.name, value: c.id })) },
         { key: 'gradeId', label: 'Year', value: item.gradeId, options: ref?.grades.map((g) => ({ label: g.name, value: g.id })) },
         { key: 'academicYearId', label: 'Academic Year', value: item.academicYearId, options: ref?.years.map((y) => ({ label: y.name, value: y.id })) },
@@ -2462,10 +2466,10 @@ export default function Home() {
                             {item.orderIndex !== undefined && <span>Order: {item.orderIndex}</span>}
                             {a && <span>Class: {a.cls} · Year: {a.year}</span>}
                             {!a && item.gradeId && (
-                              <span>Year: {ref?.grades?.find((g) => g.id === item.gradeId)?.name || '—'}</span>
+                              <span>Year: {yearLevel(ref?.grades?.find((g) => g.id === item.gradeId)?.name)}</span>
                             )}
                             {!a && item.classId && (
-                              <span>Class: {ref?.classes?.find((c) => c.id === item.classId)?.name || '—'} · Subject: {ref?.subjects?.find((s) => s.id === item.subjectId)?.name || '—'}</span>
+                              <span>Class: {ref?.classes?.find((c) => c.id === item.classId)?.name || '—'}</span>
                             )}
                           </td>
                           <td>
