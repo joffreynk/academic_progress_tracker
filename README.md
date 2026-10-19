@@ -109,6 +109,12 @@ Data lives in `clubs`, `club_teachers`, `club_members` and `club_activities` (mi
 - **Statistics** — academic and behavioural distribution analytics for a generated monthly report (counts and percentages per criterion, with Excel export). It prompts you to generate the monthly report first when there is nothing to analyse.
 - **Data Quality** — the administrative integrity dashboard: draft and returned report queues over a chosen date range, with one-click navigation into the report.
 
+### Rating mixes print as percentages
+
+Every surface that shows a rating mix prints each rating as a **share of all ratings in that set**, largest first — `Needs Improvement 50%, Good 30%, Excellent 20%` for 5 / 3 / 2 out of 10 — never raw counts. That covers the student follow-up PDF and its on-screen report, the class summary (facts and month-by-month mixes), the per-subject and per-student Excel exports, the Monthly Reports perspective cards, and both club-report variants. Shares always total 100% per criterion, so the same subject data reads identically wherever it appears.
+
+`npm run demo:reports` writes four sample PDFs to `demo/` (ignored by Git) so the layout can be inspected without a database: the student follow-up across ten subjects, the class summary, the club report driven by its academic profile, and the club report fallback that uses only club activity records.
+
 ## Entity management (Manage page)
 
 The **Manage** tab lets administrators create, edit, search, and deactivate core entities:

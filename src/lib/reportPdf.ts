@@ -18,7 +18,6 @@ const WARN: Color = [176, 122, 30];
 const BAD: Color = [186, 96, 74];
 
 export const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-const countText = (values: Record<string, number>) => Object.entries(values).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${pretty(k)} ${v}`).join(', ') || 'No observations';
 
 /** `Needs Improvement 52%, Good 30%` — each category's share of every rating in the set, largest first. */
 export const percentText = (values: Record<string, number>) => {
@@ -575,10 +574,10 @@ export async function buildStudentPdf(input: {
   ]);
 
   w.kpiStrip([
-    { label: 'Performance', value: pretty(overall.performanceResult), sub: countText(overall.performance), tone: toneFor(overall.performanceResult) },
-    { label: 'Punctuality', value: overall.punctualityResult, sub: countText(overall.punctuality), tone: toneFor(overall.punctualityResult) },
-    { label: 'Homework', value: overall.homeworkResult, sub: countText(overall.homework), tone: toneFor(overall.homeworkResult) },
-    { label: 'Conduct', value: pretty(overall.conductResult), sub: countText(overall.conduct), tone: toneFor(overall.conductResult) },
+    { label: 'Performance', value: pretty(overall.performanceResult), sub: percentText(overall.performance), tone: toneFor(overall.performanceResult) },
+    { label: 'Punctuality', value: overall.punctualityResult, sub: percentText(overall.punctuality), tone: toneFor(overall.punctualityResult) },
+    { label: 'Homework', value: overall.homeworkResult, sub: percentText(overall.homework), tone: toneFor(overall.homeworkResult) },
+    { label: 'Conduct', value: pretty(overall.conductResult), sub: percentText(overall.conduct), tone: toneFor(overall.conductResult) },
   ]);
 
   let sectionNo = 1;
@@ -618,10 +617,10 @@ export async function buildStudentPdf(input: {
 
   w.sectionCompact(`${sectionNo++}. Punctuality & discipline`);
   w.facts([
-    { label: 'Punctuality', value: `${overall.punctualityResult} — ${countText(overall.punctuality)}` },
-    { label: 'Homework', value: `${overall.homeworkResult} — ${countText(overall.homework)}` },
-    { label: 'Participation', value: `${pretty(overall.participationResult)} — ${countText(overall.participation)}` },
-    { label: 'Conduct', value: `${pretty(overall.conductResult)} — ${countText(overall.conduct)}` },
+    { label: 'Punctuality', value: `${overall.punctualityResult} — ${percentText(overall.punctuality)}` },
+    { label: 'Homework', value: `${overall.homeworkResult} — ${percentText(overall.homework)}` },
+    { label: 'Participation', value: `${pretty(overall.participationResult)} — ${percentText(overall.participation)}` },
+    { label: 'Conduct', value: `${pretty(overall.conductResult)} — ${percentText(overall.conduct)}` },
     { label: 'Recorded', value: `${overall.lessons} lesson report${overall.lessons === 1 ? '' : 's'} in the period` },
   ], { size: 7.5, labelSize: 6, labelWidth: 84, lineH: 10, gap: 4 });
 
@@ -752,8 +751,8 @@ export async function buildClassSummaryPdf(input: {
     { label: 'Students covered', value: `${students} student${students === 1 ? '' : 's'}` },
     { label: 'Subject rows', value: `${summaries.length} student-subject summar${summaries.length === 1 ? 'y' : 'ies'}` },
     { label: 'Recorded lessons', value: `${totals.lessons} lesson report${totals.lessons === 1 ? '' : 's'}` },
-    { label: 'Punctuality', value: puncTotal ? `${Math.round((puncOnTime / puncTotal) * 100)}% on time · ${countText(totals.punctuality)}` : 'No data' },
-    { label: 'Performance mix', value: countText(totals.performance) },
+    { label: 'Punctuality', value: puncTotal ? `${Math.round((puncOnTime / puncTotal) * 100)}% on time · ${percentText(totals.punctuality)}` : 'No data' },
+    { label: 'Performance mix', value: percentText(totals.performance) },
   ]);
 
   w.section('1. Student subject summary', 'Every recorded student-subject combination in the selected period.');
@@ -766,7 +765,7 @@ export async function buildClassSummaryPdf(input: {
 
   if (months.length > 1) {
     w.section('2. Month-over-month coverage', 'Lesson volume and punctuality mix per month across the whole cohort. Every month in the period is listed, including months with no recorded lessons.');
-    w.table(['MONTH', 'STATUS', 'SUBJECT ROWS', 'LESSON REPORTS', 'STUDENTS', 'PUNCTUALITY MIX'],
+    w.table(['MONTH', 'STATUS', 'SUBJECT ROWS', 'LESSON REPORTS', 'STUDENTS', 'PUNCTUALITY MIX', 'PERFORMANCE MIX'],
       months.map((m) => {
         const groups = comparison.filter((c) => c.months.some((cm) => cm.month === m));
         const cells = groups.map((c) => c.months.find((cm) => cm.month === m)!);
@@ -775,7 +774,7 @@ export async function buildClassSummaryPdf(input: {
         return [
           monthLabelShort(m), closedMonths.includes(m) ? 'Closed' : 'Open', String(cells.length),
           String(cells.reduce((a, s) => a + s.lessons, 0)), String(new Set(groups.map((c) => c.studentId)).size),
-          countText(punctuality), countText(performance),
+          percentText(punctuality), percentText(performance),
         ];
       }), { fontSize: 7 });
   }
@@ -887,10 +886,10 @@ export async function buildClubStudentReport(input: {
     { label: 'Conduct', value: subjectProfile.conductResult, sub: percentText(subjectProfile.conduct), tone: toneFor(subjectProfile.conductResult) },
   ] : [
     activityCard,
-    { label: 'Punctuality', value: topValue(tally('punctuality')), sub: countText(tally('punctuality')), tone: toneFor(topValue(tally('punctuality'))) },
-    { label: 'Performance', value: topValue(tally('performance')), sub: countText(tally('performance')), tone: toneFor(topValue(tally('performance'))) },
-    { label: 'Participation', value: topValue(tally('participation')), sub: countText(tally('participation')), tone: toneFor(topValue(tally('participation'))) },
-    { label: 'Conduct', value: topValue(tally('conduct')), sub: countText(tally('conduct')), tone: toneFor(topValue(tally('conduct'))) },
+    { label: 'Punctuality', value: topValue(tally('punctuality')), sub: percentText(tally('punctuality')), tone: toneFor(topValue(tally('punctuality'))) },
+    { label: 'Performance', value: topValue(tally('performance')), sub: percentText(tally('performance')), tone: toneFor(topValue(tally('performance'))) },
+    { label: 'Participation', value: topValue(tally('participation')), sub: percentText(tally('participation')), tone: toneFor(topValue(tally('participation'))) },
+    { label: 'Conduct', value: topValue(tally('conduct')), sub: percentText(tally('conduct')), tone: toneFor(topValue(tally('conduct'))) },
   ]);
 
   w.section('1. Activity record', 'One row per club activity for this student, with the month it was recorded in.');

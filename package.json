@@ -8,6 +8,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "tsx scripts/rules.test.ts && tsx scripts/password.test.ts && tsx scripts/pdf.test.ts && tsx scripts/monthly.test.ts",
+    "demo:reports": "tsx scripts/demo-reports.ts",
     "db:seed": "tsx scripts/seed.ts",
     "db:clear-records": "tsx scripts/clear-recorded-data.ts",
     "db:generate": "drizzle-kit generate",

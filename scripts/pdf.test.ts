@@ -180,8 +180,8 @@ test('pdf: KPI counts stay whole and one comment per subject is listed', async (
   assert.equal(doc.getNumberOfPages(), 1, `the report must stay a single page, got ${doc.getNumberOfPages()}`);
   const text = pdfStrings(buf);
   assert.ok(
-    text.includes('Always On Time 21, Occasionally Late 6, Frequently Late 2, Occasionally Absent 2, Frequently Absent 2'),
-    'the punctuality KPI must print every count instead of an ellipsis',
+    text.includes('Always On Time 64%, Occasionally Late 18%, Frequently Late 6%, Occasionally Absent 6%, Frequently Absent 6%'),
+    'the punctuality KPI must print every rating as a share of the whole instead of an ellipsis',
   );
   assert.ok(!/[\u0085\u2026]/.test(text), 'no cell in the report may end with an ellipsis');
   assert.ok(!text.includes('Needs improvement observation'), 'no default comment may be invented for a flagged row');

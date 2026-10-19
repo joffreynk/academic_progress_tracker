@@ -52,6 +52,9 @@ logins*
 /teacher-credentials.sql
 /clear-recorded-data.sql
 
+# generated demo PDFs (npm run demo:reports)
+demo/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
