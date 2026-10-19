@@ -20,6 +20,30 @@ const BAD: Color = [186, 96, 74];
 export const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const countText = (values: Record<string, number>) => Object.entries(values).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${pretty(k)} ${v}`).join(', ') || 'No observations';
 
+/** `Needs Improvement 52%, Good 30%` — each category's share of every rating in the set, largest first. */
+export const percentText = (values: Record<string, number>) => {
+  const total = Object.values(values).reduce((a, b) => a + b, 0);
+  if (!total) return 'No observations';
+  return Object.entries(values)
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${pretty(k)} ${Math.round((v / total) * 100)}%`)
+    .join(', ');
+};
+
+/** One child's academic profile across every subject: the headline result plus the rating mix behind it. */
+export type ClubAcademicProfile = {
+  label: string;
+  performance: Record<string, number>;
+  punctuality: Record<string, number>;
+  homework: Record<string, number>;
+  conduct: Record<string, number>;
+  performanceResult: string;
+  punctualityResult: string;
+  homeworkResult: string;
+  conductResult: string;
+};
+
 // `key` is the SubjectMonthSummary field each row reads; labels are for display only.
 const METRICS: { label: string; key: keyof SubjectMonthSummary; render: (m: SubjectMonthSummary) => string; numeric?: (m: SubjectMonthSummary) => number | null }[] = [
   { label: 'Lessons recorded', key: 'lessons', render: (m) => String(m.lessons), numeric: (m) => m.lessons },
@@ -818,8 +842,9 @@ export async function buildClubStudentReport(input: {
   school: string; club: { name: string; description?: string | null };
   student: { name: string; code: string; className?: string | null };
   rows: ClubActivityRow[]; activitiesTotal?: number; logoDataUrl?: string | null;
+  subjectProfile?: ClubAcademicProfile;
 }): Promise<{ doc: Doc; filename: string }> {
-  const { school, club, student, activitiesTotal, logoDataUrl = null } = input;
+  const { school, club, student, activitiesTotal, logoDataUrl = null, subjectProfile } = input;
   const rows = [...input.rows].sort((a, b) => a.activityDate.slice(0, 7).localeCompare(b.activityDate.slice(0, 7)));
   const from = rows.length ? clubActivityMonth(rows[0].activityDate) : '';
   const to = rows.length ? clubActivityMonth(rows[rows.length - 1].activityDate) : '';
@@ -838,6 +863,7 @@ export async function buildClubStudentReport(input: {
     { label: 'Class', value: student.className || 'Not specified' },
     { label: 'Club', value: club.name },
     { label: 'Period', value: periodText },
+    ...(subjectProfile ? [{ label: 'Academic profile', value: subjectProfile.label }] : []),
   ]);
 
   const tally = (key: 'punctuality' | 'performance' | 'participation' | 'conduct') => {
@@ -849,17 +875,22 @@ export async function buildClubStudentReport(input: {
     const entry = Object.entries(acc).sort((a, b) => b[1] - a[1])[0];
     return entry ? pretty(entry[0]) : 'No data';
   };
-  const punctuality = tally('punctuality');
-  const performance = tally('performance');
-  const participation = tally('participation');
-  const conduct = tally('conduct');
 
-  w.kpiStrip([
-    { label: 'Activities recorded', value: `${rows.length}/${activitiesTotal ?? rows.length}`, sub: rows.length ? 'entries with a record' : 'no rows yet' },
-    { label: 'Punctuality', value: topValue(punctuality), sub: countText(punctuality), tone: toneFor(topValue(punctuality)) },
-    { label: 'Performance', value: topValue(performance), sub: countText(performance), tone: toneFor(topValue(performance)) },
-    { label: 'Participation', value: topValue(participation), sub: countText(participation), tone: toneFor(topValue(participation)) },
-    { label: 'Conduct', value: topValue(conduct), sub: countText(conduct), tone: toneFor(topValue(conduct)) },
+  const activityCard = { label: 'Activities recorded', value: `${rows.length}/${activitiesTotal ?? rows.length}`, sub: rows.length ? 'entries with a record' : 'no rows yet' };
+  w.kpiStrip(subjectProfile ? [
+    activityCard,
+    // Two lines per criterion: the headline result, then every rating as a share of the
+    // child's ratings across all subjects (10 ratings → 5 Needs Improvement = 50%).
+    { label: 'Performance', value: subjectProfile.performanceResult, sub: percentText(subjectProfile.performance), tone: toneFor(subjectProfile.performanceResult) },
+    { label: 'Punctuality', value: subjectProfile.punctualityResult, sub: percentText(subjectProfile.punctuality), tone: toneFor(subjectProfile.punctualityResult) },
+    { label: 'Homework', value: subjectProfile.homeworkResult, sub: percentText(subjectProfile.homework), tone: toneFor(subjectProfile.homeworkResult) },
+    { label: 'Conduct', value: subjectProfile.conductResult, sub: percentText(subjectProfile.conduct), tone: toneFor(subjectProfile.conductResult) },
+  ] : [
+    activityCard,
+    { label: 'Punctuality', value: topValue(tally('punctuality')), sub: countText(tally('punctuality')), tone: toneFor(topValue(tally('punctuality'))) },
+    { label: 'Performance', value: topValue(tally('performance')), sub: countText(tally('performance')), tone: toneFor(topValue(tally('performance'))) },
+    { label: 'Participation', value: topValue(tally('participation')), sub: countText(tally('participation')), tone: toneFor(topValue(tally('participation'))) },
+    { label: 'Conduct', value: topValue(tally('conduct')), sub: countText(tally('conduct')), tone: toneFor(topValue(tally('conduct'))) },
   ]);
 
   w.section('1. Activity record', 'One row per club activity for this student, with the month it was recorded in.');
@@ -903,8 +934,9 @@ export async function buildClubReportsZip(input: {
   activities: { id: string; title: string; activityDate: string; status: string }[];
   records: { studentId: string; activityId: string; punctuality: string | null; performance: string | null; participation: string | null; conduct: string | null; comment: string | null }[];
   logoDataUrl?: string | null; onProgress?: (done: number, total: number) => void;
+  profiles?: Record<string, ClubAcademicProfile>;
 }): Promise<{ bytes: Uint8Array; filename: string; count: number }> {
-  const { school, club, members, activities, records, logoDataUrl = null, onProgress } = input;
+  const { school, club, members, activities, records, logoDataUrl = null, onProgress, profiles } = input;
   const activityById = new Map(activities.map((a) => [a.id, a]));
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
@@ -922,7 +954,7 @@ export async function buildClubReportsZip(input: {
     });
     const { doc, filename } = await buildClubStudentReport({
       school, club, student: { name: member.name, code: member.code, className: member.className || undefined },
-      rows, activitiesTotal: activities.length, logoDataUrl,
+      rows, activitiesTotal: activities.length, logoDataUrl, subjectProfile: profiles?.[member.id],
     });
     let entry = filename;
     if (taken.has(entry)) entry = entry.replace(/\.pdf$/, `-${taken.size + 1}.pdf`);

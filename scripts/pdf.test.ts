@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 import test from 'node:test';
 import { inflateSync } from 'node:zlib';
-import { buildStudentPdf, buildClassSummaryPdf, buildClassReportsZip, buildClubStudentReport, loadLogoDataUrl } from '../src/lib/reportPdf';
+import { buildStudentPdf, buildClassSummaryPdf, buildClassReportsZip, buildClubStudentReport, loadLogoDataUrl, percentText } from '../src/lib/reportPdf';
 import { FALLBACK_LOGO_DATA_URL } from '../src/lib/defaultLogo';
 import { buildPeriod } from '../src/lib/period';
 import { groupReports, groupReportsByMonth, summarize, summarizeByMonth, type Observation } from '../src/lib/reporting';
@@ -337,6 +337,51 @@ test('pdf: club report lists activities by month', async () => {
   assert.ok(text.includes('MONTH'), 'the activity table must be headed MONTH');
   assert.ok(!text.includes('2026-09'), 'the raw month key must not be printed in the report');
   assert.ok(text.includes('Robotics Club'), 'the club name must appear in the report');
+  assert.ok(text.includes('PARTICIPATION'), 'without an academic profile the card mix stays club-record based');
+});
+
+test('pdf: academic profile percentages divide every rating into shares of the whole', () => {
+  assert.equal(
+    percentText({ NEEDS_IMPROVEMENT: 5, GOOD: 3, EXCELLENT: 2 }),
+    'Needs Improvement 50%, Good 30%, Excellent 20%',
+    'ten ratings across subjects must read as 50/30/20 shares that total 100%',
+  );
+  assert.equal(percentText({ ALWAYS_ON_TIME: 92 }), 'Always On Time 100%', 'a lone category owns the whole set');
+  assert.equal(percentText({ USUALLY_COMPLETED: 1, ALWAYS_COMPLETED: 8, RARELY_COMPLETED: 1 }), 'Always Completed 80%, Usually Completed 10%, Rarely Completed 10%', 'homework must order by share');
+  assert.equal(percentText({ GOOD: 0, EXCELLENT: 4 }), 'Excellent 100%', 'zero-count categories drop out');
+  assert.equal(percentText({}), 'No observations', 'an empty set must say so instead of dividing by zero');
+});
+
+test('pdf: club report cards pair the headline result with the subject mix', async () => {
+  const { doc } = await buildClubStudentReport({
+    school: 'Ecole Maarif',
+    club: { name: 'Robotics Club' },
+    student: { name: 'Ali Kamberis', code: 'STU-010', className: '8B' },
+    rows: [{ activityId: 'a1', activityDate: '2026-09', title: 'Line-following robots', status: 'APPROVED', punctuality: 'ALWAYS_ON_TIME', performance: 'GOOD', participation: 'ACTIVE', conduct: 'GOOD', comment: null }],
+    activitiesTotal: 1,
+    subjectProfile: {
+      label: 'Academic year 2026-2027',
+      performance: { NEEDS_IMPROVEMENT: 5, GOOD: 3, EXCELLENT: 2 },
+      punctuality: { ALWAYS_ON_TIME: 9, OCCASIONALLY_LATE: 1 },
+      homework: { ALWAYS_COMPLETED: 8, USUALLY_COMPLETED: 1, RARELY_COMPLETED: 1 },
+      conduct: { GOOD: 10 },
+      performanceResult: 'Needs Improvement',
+      punctualityResult: 'Always On Time',
+      homeworkResult: 'Usually Completed',
+      conductResult: 'Good',
+    },
+  });
+
+  const text = pdfStrings(Buffer.from(doc.output('arraybuffer') as ArrayBuffer));
+  for (const label of ['PERFORMANCE', 'PUNCTUALITY', 'HOMEWORK', 'CONDUCT']) {
+    assert.ok(text.includes(label), `the ${label} card must be printed`);
+  }
+  assert.ok(text.includes('Needs Improvement 50%'), 'the performance card must show the 50% share');
+  assert.ok(text.includes('Good 30%') && text.includes('Excellent 20%'), 'every performance share must be listed');
+  assert.ok(text.includes('Always On Time 90%'), 'the punctuality card must show its share');
+  assert.ok(text.includes('Academic year 2026-2027'), 'the identity strip must name the profile window');
+  assert.ok(text.includes('Needs Improvement'), 'the headline result must sit above the mix');
+  assert.ok(text.includes('ACADEMIC PROFILE'), 'the strip labels the academic profile window');
 });
 
 test('pdf: student follow-up carries the clubs the child belongs to', async () => {

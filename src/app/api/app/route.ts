@@ -6,8 +6,8 @@ import { z } from 'zod';
 import { AppError, audit, checkOrigin, orgFor, requireUser, schoolToday, dateMinus, teacherFor, validLessonDate, reportDatePolicy, reportWindowLabel, MIN_REPORT_WINDOW_DAYS, MAX_REPORT_WINDOW_DAYS } from '@/lib/security';
 import { saveMonthlyRecord } from '@/lib/lessons';
 import { loadSubjectRoster } from '@/lib/roster';
-import { groupReports, groupReportsByMonth, summarizeClubs, type StudentClubSummary } from '@/lib/reporting';
-import { resolvePeriod, monthStart, monthEnd, periodSlug, MONTH_PATTERN } from '@/lib/period';
+import { groupReports, groupReportsByMonth, summarize, summarizeClubs, type Observation, type StudentClubSummary } from '@/lib/reporting';
+import { resolvePeriod, monthStart, monthEnd, periodSlug, periodLabel, monthsBetween, MONTH_PATTERN } from '@/lib/period';
 import { reviewTransition } from '@/lib/review';
 import { normalizeTeacherAssignmentImportRow, canonicalSubjectName, gradeNameForClass, placeholderTeacherEmail, subjectCodeFor, subjectKey, usernameFromName } from '@/lib/importing';
 import { logoUrlSchema } from '@/lib/logo';
@@ -370,8 +370,57 @@ const lessonRecords = await db.select({
   }
   const teacherOptions=user.role==='ADMIN'?await db.select({id:teachers.id,name:teachers.name,active:teachers.active}).from(teachers).where(eq(teachers.organizationId,org.id)).orderBy(teachers.name):[];
   const studentOptions=user.role==='TEACHER'?await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,classId:students.classId,className:classes.name}).from(students).leftJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),eq(students.status,'ACTIVE'))).orderBy(students.fullName).limit(2000):[];
-  return Response.json({clubs:scoped,teachers:assignedTeachers,members,activities,records,teacherOptions,studentOptions,role:user.role});
- }
+   return Response.json({clubs:scoped,teachers:assignedTeachers,members,activities,records,teacherOptions,studentOptions,role:user.role});
+  }
+  // Academic profile behind the club follow-up report: the child's ratings across every subject,
+  // returned as raw mixes plus the same headline results the main report uses, so the card can show
+  // "Needs Improvement" over "Needs Improvement 52%, Good 40%" without a second calculation.
+  if(view==='clubProfiles'){
+   const requested=[...new Set((url.searchParams.get('studentIds')||'').split(',').map(s=>s.trim()).filter(Boolean))].slice(0,500);
+   if(!requested.length) return Response.json({profile:{label:'No students in scope',from:'',to:''},tallies:{}});
+   let allowed=requested;
+   if(teacher){
+    const mine=(await db.select({clubId:clubTeachers.clubId}).from(clubTeachers).where(eq(clubTeachers.teacherId,teacher.id))).map(r=>r.clubId);
+    const owned=mine.length?(await db.select({studentId:clubMembers.studentId}).from(clubMembers).where(and(inArray(clubMembers.clubId,mine),inArray(clubMembers.studentId,requested)))).map(r=>r.studentId):[];
+    allowed=[...new Set(owned)];
+   }
+   if(!allowed.length) return Response.json({profile:{label:'No students in scope',from:'',to:''},tallies:{}});
+   const today=schoolToday(org.timezone);
+   const explicit=url.searchParams.get('month')||url.searchParams.get('from')||url.searchParams.get('to');
+   let period=resolvePeriod(url.searchParams,today);
+   let profileLabel=periodLabel(period);
+   if(!explicit){
+    const [year]=await db.select().from(academicYears).where(and(eq(academicYears.organizationId,org.id),eq(academicYears.active,true),lte(academicYears.startDate,today),gte(academicYears.endDate,today))).limit(1);
+    if(year){ period={from:year.startDate,to:year.endDate,months:monthsBetween(year.startDate,year.endDate)}; profileLabel=`Academic year ${year.name}`; }
+    else profileLabel='All recorded data';
+   }
+   const [settingsRow]=await db.select().from(settings).where(eq(settings.organizationId,org.id));
+   const rules=settingsRow;
+   const monthFrom=period.months[0]||period.from.slice(0,7);
+   const monthTo=period.months[period.months.length-1]||period.to.slice(0,7);
+   const entryHeader=await db.select({entry:monthlyEntries,className:classes.name,subjectName:subjects.name,teacherName:teachers.name}).from(monthlyEntries).innerJoin(classes,eq(classes.id,monthlyEntries.classId)).innerJoin(subjects,eq(subjects.id,monthlyEntries.subjectId)).innerJoin(teachers,eq(teachers.id,monthlyEntries.teacherId)).where(and(eq(monthlyEntries.organizationId,org.id),inArray(monthlyEntries.status,['SUBMITTED','UNDER_REVIEW','APPROVED']),gte(monthlyEntries.month,monthFrom),lte(monthlyEntries.month,monthTo))).limit(1000);
+   const monthlyKeys=new Set(entryHeader.map(h=>`${h.entry.classId}|${h.entry.subjectId}|${h.entry.month}`));
+   const legacyRows=await db.select({classId:lessons.classId,subjectId:lessons.subjectId,lessonDate:lessons.lessonDate,topic:lessons.topic,lessonId:lessons.id,status:lessons.status,studentId:students.id,studentName:sql<string>`coalesce(${records.studentNameSnapshot}, ${students.fullName})`,studentCode:sql<string>`coalesce(${records.studentCodeSnapshot}, ${students.studentId})`,className:sql<string>`coalesce(${lessons.classNameSnapshot}, ${classes.name})`,subjectName:sql<string>`coalesce(${lessons.subjectNameSnapshot}, ${subjects.name})`,teacherName:sql<string>`coalesce(${lessons.teacherNameSnapshot}, ${teachers.name})`,attendance:records.attendanceStatus,performance:records.performance,conduct:records.conduct,punctuality:records.punctuality,homework:records.homework,participation:records.participation,comment:records.comment}).from(records).innerJoin(lessons,eq(lessons.id,records.monthlyLessonId)).innerJoin(students,eq(students.id,records.studentId)).innerJoin(classes,eq(classes.id,lessons.classId)).innerJoin(subjects,eq(subjects.id,lessons.subjectId)).innerJoin(teachers,eq(teachers.id,lessons.teacherId)).where(and(eq(lessons.organizationId,org.id),inArray(lessons.status,['SUBMITTED','UNDER_REVIEW','APPROVED']),gte(lessons.lessonDate,period.from),lte(lessons.lessonDate,period.to),inArray(records.studentId,allowed))).orderBy(lessons.lessonDate).limit(20000);
+   const observations:Observation[]=legacyRows.filter(r=>!monthlyKeys.has(`${r.classId}|${r.subjectId}|${r.lessonDate.slice(0,7)}`)) as unknown as Observation[];
+   if(entryHeader.length){
+    const studentRows=await db.select({monthlyEntryId:monthlyStudentEntries.monthlyEntryId,studentId:students.id,studentName:sql<string>`coalesce(${monthlyStudentEntries.studentNameSnapshot}, ${students.fullName})`,studentCode:sql<string>`coalesce(${monthlyStudentEntries.studentCodeSnapshot}, ${students.studentId})`,punctuality:monthlyStudentEntries.punctuality,performance:monthlyStudentEntries.performance,participation:monthlyStudentEntries.participation,homework:monthlyStudentEntries.homework,conduct:monthlyStudentEntries.conduct,comment:monthlyStudentEntries.comment}).from(monthlyStudentEntries).innerJoin(students,eq(students.id,monthlyStudentEntries.studentId)).where(inArray(monthlyStudentEntries.monthlyEntryId,entryHeader.map(h=>h.entry.id))).orderBy(students.fullName).limit(20000);
+    const rowsByEntry=new Map<string,MonthlyStudentRow[]>();
+    for(const row of studentRows){const list=rowsByEntry.get(row.monthlyEntryId)||[];list.push(row);rowsByEntry.set(row.monthlyEntryId,list);}
+    const scope=new Set(allowed);
+    for(const h of entryHeader){
+     const rows=(rowsByEntry.get(h.entry.id)||[]).filter(r=>scope.has(r.studentId));
+     observations.push(...entryObservations(h.entry,rows as MonthlyStudentRow[],h.className,h.subjectName,h.teacherName,rules).map(o=>({classId:h.entry.classId,subjectId:h.entry.subjectId,...o,teacherName:o.teacherName||h.teacherName})) as unknown as Observation[]);
+    }
+   }
+   const byStudent=new Map<string,Observation[]>();
+   for(const row of observations){const list=byStudent.get(row.studentId)||[];list.push(row);byStudent.set(row.studentId,list);}
+   const tallies:Record<string,{performance:Record<string,number>;punctuality:Record<string,number>;homework:Record<string,number>;conduct:Record<string,number>;performanceResult:string;punctualityResult:string;homeworkResult:string;conductResult:string;observations:number}>={};
+   for(const [sid,rows] of byStudent){
+    const s=summarize(rows,rules);
+    tallies[sid]={performance:s.performance,punctuality:s.punctuality,homework:s.homework,conduct:s.conduct,performanceResult:s.performanceResult,punctualityResult:s.punctualityResult,homeworkResult:s.homeworkResult,conductResult:s.conductResult,observations:rows.length};
+   }
+   return Response.json({profile:{label:profileLabel,from:period.from,to:period.to},tallies});
+  }
  throw new AppError('Unknown view.',404);
  }catch(e){return fail(e);}}
 

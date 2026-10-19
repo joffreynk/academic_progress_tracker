@@ -221,6 +221,18 @@ async function main() {
   const activitiesForClub = (view.body.activities as any[]).filter((a) => a.clubId === clubId);
   const recordsForClub = (view.body.records as any[]).filter((r) => activitiesForClub.some((a) => a.id === r.clubActivityId));
   const { buildClubReportsZip } = await import('../src/lib/reportPdf');
+  const memberStudentIds = (view.body.members as any[]).filter((m) => m.clubId === clubId).map((m) => m.studentId as string);
+  const profileView = await call(`/api/app?view=clubProfiles&studentIds=${memberStudentIds.join(',')}`);
+  const profileBody = profileView.body as { profile?: { label: string; from: string; to: string }; tallies?: Record<string, any> };
+  const tallies = profileBody.tallies || {};
+  check('club academic profile answers with a window', profileView.status === 200 && !!profileBody.profile?.label, { status: profileView.status, profile: profileBody.profile });
+  const firstTally = Object.values(tallies)[0];
+  check('profile mixes subject ratings for at least one member', Object.keys(tallies).length > 0 && !!firstTally, { members: memberStudentIds.length, tallies: Object.keys(tallies).length });
+  check('profile carries four criteria and headline results', !!firstTally && ['performance', 'punctuality', 'homework', 'conduct'].every((k) => firstTally[k] && typeof firstTally[k] === 'object')
+    && ['performanceResult', 'punctualityResult', 'homeworkResult', 'conductResult'].every((k) => typeof firstTally[k] === 'string'), firstTally);
+  const perfTotal = firstTally ? Object.values(firstTally.performance as Record<string, number>).reduce((a, b) => a + b, 0) : 0;
+  check('profile performance mix totals real ratings', perfTotal > 0, firstTally?.performance);
+
   const zip = await buildClubReportsZip({
     school: 'Test School',
     club: { name: targetClub?.name || clubName, description: targetClub?.description || '' },
@@ -228,6 +240,7 @@ async function main() {
       .map((m) => ({ id: m.studentId, name: m.studentName, code: m.studentCode, className: m.className || undefined })),
     activities: activitiesForClub.map((a) => ({ id: a.id, title: a.title, activityDate: a.activityDate, status: a.status })),
     records: recordsForClub.map((r) => ({ studentId: r.studentId, activityId: r.clubActivityId, punctuality: r.punctuality, performance: r.performance, participation: r.participation, conduct: r.conduct, comment: r.comment })),
+    profiles: Object.fromEntries(Object.entries(tallies).map(([studentId, tally]) => [studentId, { label: profileBody.profile?.label || 'Academic profile', ...tally }])),
     logoDataUrl: TINY_PNG,
   });
   const JSZip = (await import('jszip')).default;
@@ -241,6 +254,8 @@ async function main() {
   check('club report shows member observations', !!firstText && firstText.includes('Always On Time') && firstText.includes('Good'), !!firstText);
   check('club report omits the student ID', !!firstText && !firstText.includes(firstMember.studentCode), firstMember.studentCode);
   check('club report omits the student code column header', !/STUDENT (ID|CODE)/i.test(firstText || ''), firstText?.slice(0, 200));
+  check('club report grades the academic profile in percentages', !!firstText && /PERFORMANCE/.test(firstText) && /PUNCTUALITY/.test(firstText) && /HOMEWORK/.test(firstText) && /\d+%/.test(firstText), firstText?.slice(0, 400));
+  check('club report names the academic profile window', !!firstText && !!profileBody.profile?.label && firstText.includes('ACADEMIC PROFILE'), profileBody.profile);
 
   const updated = await action('updateClub', {
     id: clubId, name: `${clubName} v2`, description: 'Updated', academicYearId: years[0]?.id || null, active: true,

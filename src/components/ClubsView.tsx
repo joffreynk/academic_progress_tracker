@@ -2,7 +2,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Plus, RefreshCw, CheckCircle2, Edit3, Trash2, X, Search, Users, Clock3, FileArchive, Wand2, ClipboardList } from 'lucide-react';
 import type { ModalConfig } from '@/components/Modal';
-import { downloadClubReportsZip } from '@/lib/reportPdf';
+import { downloadClubReportsZip, type ClubAcademicProfile } from '@/lib/reportPdf';
 import { punctualityLabels, punctualityLevels, performanceLevels, participationLevels, conductLevels } from '@/lib/monthly';
 import { monthLabel } from '@/lib/period';
 
@@ -276,7 +276,7 @@ export default function ClubsView({
     await loadData();
   });
 
-  const downloadClubReports = (club: Club) => {
+  const downloadClubReports = async (club: Club) => {
     if (!data || building) return;
     const members = data.members.filter((m) => m.clubId === club.id);
     if (!members.length) { setError('Add club members before building reports.'); return; }
@@ -286,11 +286,24 @@ export default function ClubsView({
     setBuilding(true);
     setError(null);
     setNotice(`Building one club report for each of ${members.length} members.`);
+    // The academic profile is a nice-to-have: without it the report keeps its club-record cards.
+    let profiles: Record<string, ClubAcademicProfile> | undefined;
+    try {
+      const scope = await api('clubProfiles', { studentIds: members.map((m) => m.studentId).join(',') });
+      const label = scope?.profile?.label || 'All recorded data';
+      profiles = {};
+      for (const [studentId, tally] of Object.entries<Record<string, unknown>>(scope?.tallies || {})) {
+        profiles[studentId] = { label, ...(tally as Omit<ClubAcademicProfile, 'label'>) };
+      }
+    } catch {
+      profiles = undefined;
+    }
     downloadClubReportsZip({
       school, club: { name: club.name, description: club.description || '' },
       members: members.map((m) => ({ id: m.studentId, name: m.studentName, code: m.studentCode, className: m.className || undefined })),
       activities: activities.map((a) => ({ id: a.id, title: a.title, activityDate: a.activityDate, status: a.status })),
       records: records.map((r) => ({ studentId: r.studentId, activityId: r.clubActivityId, punctuality: r.punctuality, performance: r.performance, participation: r.participation, conduct: r.conduct, comment: r.comment })),
+      profiles,
       logoUrl: logoUrl || '/icons/school_logo.png',
       onProgress: (done, total) => setNotice(`Building club PDFs. ${done} of ${total}`),
     })
