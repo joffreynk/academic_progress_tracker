@@ -1,6 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { db } from '@/db';
 import { students, subjectStudents } from '@/db/schema';
+import { AppError } from './security';
 
 // Resolve the students a monthly record covers for a class + subject.
 // An empty subject roster (no rows for the pair) means every active class
@@ -16,7 +17,11 @@ export async function loadSubjectRoster(organizationId: string, classId: string,
       academicYearId ? eq(students.academicYearId, academicYearId) : undefined,
     ))
     .orderBy(students.fullName)
-    .limit(200);
+    // One extra row: a silent cap would quietly drop students out of every completion rate.
+    .limit(201);
+  if (classStudents.length > 200) {
+    throw new AppError('Class roster exceeds the 200-student record limit. Ask your administrator to split the class.');
+  }
   const enrolled = await db
     .select({ studentId: subjectStudents.studentId })
     .from(subjectStudents)

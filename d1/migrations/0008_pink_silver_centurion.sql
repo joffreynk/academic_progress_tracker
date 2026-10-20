@@ -1,0 +1,2 @@
+CREATE INDEX `behaviour_obs_student_idx` ON `behaviour_observations` (`organization_id`,`student_id`);--> statement-breakpoint
+CREATE INDEX `behaviour_obs_class_date_idx` ON `behaviour_observations` (`organization_id`,`class_id`,`date`);

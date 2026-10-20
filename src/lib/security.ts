@@ -12,7 +12,13 @@ export const reportWindowLabel = (days: number) => `${days} day${days === 1 ? ''
 export class AppError extends Error { constructor(message: string, public status = 400) { super(message); } }
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 export async function audit(organizationId: string | null, userId: string | null, action: string, entityType: string, entityId?: string, metadata?: Record<string, unknown>) {
-  await db.insert(auditLogs).values({ organizationId, userId, action, entityType, entityId, metadata });
+  // The mutation has already committed, so a failed audit row must never surface as a 500 that
+  // tells the caller their change failed. Record it and move on.
+  try {
+    await db.insert(auditLogs).values({ organizationId, userId, action, entityType, entityId, metadata });
+  } catch (error) {
+    console.error('audit write failed', { action, entityType, entityId, error });
+  }
 }
 export async function currentUser() {
   const token = (await cookies()).get('school_session')?.value;

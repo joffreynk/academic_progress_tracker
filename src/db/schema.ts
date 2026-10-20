@@ -432,4 +432,7 @@ export const behaviourObservations = sqliteTable('behaviour_observations', {
   followUpRequired: integer('follow_up_required', { mode: 'boolean' }).notNull().default(false),
   createdAt: stamp(),
   updatedAt: updated(),
-});
+}, t => [
+  index('behaviour_obs_student_idx').on(t.organizationId, t.studentId),
+  index('behaviour_obs_class_date_idx').on(t.organizationId, t.classId, t.date),
+]);

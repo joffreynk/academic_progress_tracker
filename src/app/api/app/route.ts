@@ -43,12 +43,12 @@ export async function GET(req:Request){try{
     db.select({n:count()}).from(subjects).where(and(eq(subjects.organizationId,org.id),eq(subjects.active,true))),
     db.select({status:lessons.status,n:count()}).from(lessons).where(and(eq(lessons.organizationId,org.id),teacher?eq(lessons.teacherId,teacher.id):undefined)).groupBy(lessons.status),
     db.select({n:count()}).from(lessons).where(and(eq(lessons.organizationId,org.id),teacher?eq(lessons.teacherId,teacher.id):undefined,gte(lessons.lessonDate,`${currentMonth}-01`),lt(lessons.lessonDate,nextMonthStr))),
-    db.select({status:lessons.status,n:count()}).from(lessons).where(and(eq(lessons.organizationId,org.id),inArray(lessons.status,['SUBMITTED','UNDER_REVIEW','APPROVED','RETURNED']))).groupBy(lessons.status),
+    db.select({status:lessons.status,n:count()}).from(lessons).where(and(eq(lessons.organizationId,org.id),teacher?eq(lessons.teacherId,teacher.id):undefined,inArray(lessons.status,['SUBMITTED','UNDER_REVIEW','APPROVED','RETURNED']))).groupBy(lessons.status),
     db.select({n:count()}).from(behaviourObservations).where(and(eq(behaviourObservations.organizationId,org.id),eq(behaviourObservations.followUpRequired,true))),
     // §193: monthly entries count alongside legacy lesson rows so the dashboard reflects every report.
     db.select({status:monthlyEntries.status,n:count()}).from(monthlyEntries).where(and(eq(monthlyEntries.organizationId,org.id),teacher?eq(monthlyEntries.teacherId,teacher.id):undefined)).groupBy(monthlyEntries.status),
     db.select({n:count()}).from(monthlyEntries).where(and(eq(monthlyEntries.organizationId,org.id),teacher?eq(monthlyEntries.teacherId,teacher.id):undefined,eq(monthlyEntries.month,currentMonth))),
-    db.select({status:monthlyEntries.status,n:count()}).from(monthlyEntries).where(and(eq(monthlyEntries.organizationId,org.id),inArray(monthlyEntries.status,['SUBMITTED','UNDER_REVIEW','APPROVED','RETURNED']))).groupBy(monthlyEntries.status)
+    db.select({status:monthlyEntries.status,n:count()}).from(monthlyEntries).where(and(eq(monthlyEntries.organizationId,org.id),teacher?eq(monthlyEntries.teacherId,teacher.id):undefined,inArray(monthlyEntries.status,['SUBMITTED','UNDER_REVIEW','APPROVED','RETURNED']))).groupBy(monthlyEntries.status)
   ]);
   const ass=await db.select({id:assignments.id,classId:classes.id,className:classes.name,subjectId:subjects.id,subjectName:subjects.name,academicYearId:academicYears.id,yearName:academicYears.name,teacherName:teachers.name}).from(assignments).innerJoin(classes,eq(classes.id,assignments.classId)).innerJoin(subjects,eq(subjects.id,assignments.subjectId)).innerJoin(academicYears,eq(academicYears.id,assignments.academicYearId)).innerJoin(teachers,eq(teachers.id,assignments.teacherId)).where(and(myAssignment,eq(classes.active,true),eq(subjects.active,true),eq(academicYears.active,true))).orderBy(classes.name,subjects.name).limit(200);
   const recent=(await db.select({id:lessons.id,lessonDate:lessons.lessonDate,topic:lessons.topic,status:lessons.status,className:classes.name,subjectName:subjects.name,teacherName:teachers.name,updatedAt:lessons.updatedAt}).from(lessons).innerJoin(classes,eq(classes.id,lessons.classId)).innerJoin(subjects,eq(subjects.id,lessons.subjectId)).innerJoin(teachers,eq(teachers.id,lessons.teacherId)).where(and(eq(lessons.organizationId,org.id),teacher?eq(lessons.teacherId,teacher.id):undefined)).orderBy(desc(lessons.updatedAt)).limit(8)).map(r=>({...r,kind:'lesson' as const}));
@@ -369,7 +369,18 @@ const lessonRecords = await db.select({
    }
   }
   const teacherOptions=user.role==='ADMIN'?await db.select({id:teachers.id,name:teachers.name,active:teachers.active}).from(teachers).where(eq(teachers.organizationId,org.id)).orderBy(teachers.name):[];
-  const studentOptions=user.role==='TEACHER'?await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,classId:students.classId,className:classes.name}).from(students).leftJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),eq(students.status,'ACTIVE'))).orderBy(students.fullName).limit(2000):[];
+  // A teacher only ever picks from the children they already reach: their assigned classes or their
+  // own club rosters. The school-wide list stays behind the assignment gate that view=students uses.
+  let studentOptions:{id:string;studentId:string;fullName:string;classId:string;className:string|null}[]=[];
+  if(user.role==='TEACHER'&&teacher){
+   const assignedClassIds=(await db.selectDistinct({id:assignments.classId}).from(assignments).where(myAssignment)).map(r=>r.id);
+   const myClubIds=(await db.select({id:clubTeachers.clubId}).from(clubTeachers).where(eq(clubTeachers.teacherId,teacher.id))).map(r=>r.id);
+   const memberIds=myClubIds.length?(await db.selectDistinct({id:clubMembers.studentId}).from(clubMembers).where(inArray(clubMembers.clubId,myClubIds))).map(r=>r.id):[];
+   const byClass=assignedClassIds.length?inArray(students.classId,assignedClassIds):undefined;
+   const byClub=memberIds.length?inArray(students.id,memberIds):undefined;
+   const gate=byClass&&byClub?or(byClass,byClub):(byClass||byClub);
+   if(gate) studentOptions=await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,classId:students.classId,className:classes.name}).from(students).leftJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),eq(students.status,'ACTIVE'),gate)).orderBy(students.fullName).limit(2000);
+  }
    return Response.json({clubs:scoped,teachers:assignedTeachers,members,activities,records,teacherOptions,studentOptions,role:user.role});
   }
   // Academic profile behind the club follow-up report: the child's ratings across every subject,
@@ -378,12 +389,16 @@ const lessonRecords = await db.select({
   if(view==='clubProfiles'){
    const requested=[...new Set((url.searchParams.get('studentIds')||'').split(',').map(s=>s.trim()).filter(Boolean))].slice(0,500);
    if(!requested.length) return Response.json({profile:{label:'No students in scope',from:'',to:''},tallies:{}});
-   let allowed=requested;
-   if(teacher){
-    const mine=(await db.select({clubId:clubTeachers.clubId}).from(clubTeachers).where(eq(clubTeachers.teacherId,teacher.id))).map(r=>r.clubId);
-    const owned=mine.length?(await db.select({studentId:clubMembers.studentId}).from(clubMembers).where(and(inArray(clubMembers.clubId,mine),inArray(clubMembers.studentId,requested)))).map(r=>r.studentId):[];
-    allowed=[...new Set(owned)];
-   }
+    let allowed=requested;
+    if(teacher){
+     const mine=(await db.select({clubId:clubTeachers.clubId}).from(clubTeachers).where(eq(clubTeachers.teacherId,teacher.id))).map(r=>r.clubId);
+     const owned=mine.length?(await db.select({studentId:clubMembers.studentId}).from(clubMembers).where(and(inArray(clubMembers.clubId,mine),inArray(clubMembers.studentId,requested)))).map(r=>r.studentId):[];
+     // Cross-subject ratings sit behind the same roster gate as view=students: a teacher only gets the
+     // profile for a club member they already teach. Without one the report keeps its club-record cards.
+     const assignedClassIds=(await db.selectDistinct({id:assignments.classId}).from(assignments).where(myAssignment)).map(r=>r.id);
+     const teachable=assignedClassIds.length?new Set((await db.select({id:students.id}).from(students).where(and(eq(students.organizationId,org.id),eq(students.status,'ACTIVE'),inArray(students.classId,assignedClassIds)))).map(r=>r.id)):new Set<string>();
+     allowed=[...new Set(owned)].filter(id=>teachable.has(id));
+    }
    if(!allowed.length) return Response.json({profile:{label:'No students in scope',from:'',to:''},tallies:{}});
    const today=schoolToday(org.timezone);
    const explicit=url.searchParams.get('month')||url.searchParams.get('from')||url.searchParams.get('to');
@@ -452,8 +467,12 @@ export async function POST(req:Request){try{
     const [cls]=await db.select().from(classes).where(and(eq(classes.id,x.classId),eq(classes.organizationId,oid))).limit(1);
     const [sub]=await db.select().from(subjects).where(and(eq(subjects.id,x.subjectId),eq(subjects.organizationId,oid))).limit(1);
     if(!cls||!sub)throw new AppError('Class or subject not found.',404);
-    const year=(await db.select().from(academicYears).where(eq(academicYears.organizationId,oid))).find(y=>monthOverlapsYear(x.month,y.startDate,y.endDate));
+    // The entry must carry its class's own academic year (the legacy path validates the same pair);
+    // falling back to whichever year merely overlaps the month could file it under the wrong year.
+    const years=await db.select().from(academicYears).where(eq(academicYears.organizationId,oid));
+    const year=cls.academicYearId?years.find(y=>y.id===cls.academicYearId):years.find(y=>monthOverlapsYear(x.month,y.startDate,y.endDate));
     if(!year)throw new AppError('No academic year covers this month.',400);
+    if(!monthOverlapsYear(x.month,year.startDate,year.endDate))throw new AppError('That month falls outside the class\'s academic year.',400);
     let teacherId:string,teacherName:string;
     if(teacher){
      const [a]=await db.select({id:assignments.id}).from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,teacher.id),eq(assignments.active,true),eq(assignments.classId,x.classId),eq(assignments.subjectId,x.subjectId))).limit(1);
@@ -526,17 +545,37 @@ export async function POST(req:Request){try{
     const validIds=new Set(classStudents.map(s=>s.id));
     if(ids.some(id=>!validIds.has(id)))throw new AppError('Every selected student must be active in this class.',400);
     await runTransaction(async tx=>{
-      await tx.delete(subjectStudents).where(and(eq(subjectStudents.organizationId,oid),eq(subjectStudents.classId,x.classId),eq(subjectStudents.subjectId,x.subjectId)));
-      for(const id of ids)await tx.insert(subjectStudents).values({organizationId:oid,classId:x.classId,subjectId:x.subjectId,studentId:id});
+      // D1 cannot roll back, so never start by throwing the roster away: add the new rows first and
+      // then drop only what is no longer wanted. A mid-way failure can leave extra rows (fixed on the
+      // next save) but can never wipe a class's roster.
+      const current=await tx.select({studentId:subjectStudents.studentId}).from(subjectStudents).where(and(eq(subjectStudents.organizationId,oid),eq(subjectStudents.classId,x.classId),eq(subjectStudents.subjectId,x.subjectId)));
+      const wanted=new Set(ids);
+      for(const id of ids)if(!current.some((r:{studentId:string})=>r.studentId===id))await tx.insert(subjectStudents).values({organizationId:oid,classId:x.classId,subjectId:x.subjectId,studentId:id}).onConflictDoNothing();
+      const stale=current.filter((r:{studentId:string})=>!wanted.has(r.studentId)).map((r:{studentId:string})=>r.studentId);
+      if(stale.length)await tx.delete(subjectStudents).where(and(eq(subjectStudents.organizationId,oid),eq(subjectStudents.classId,x.classId),eq(subjectStudents.subjectId,x.subjectId),inArray(subjectStudents.studentId,stale)));
     });
     await audit(oid,user.id,'SUBJECT_ROSTER_SAVED','subject_roster',`${x.classId}|${x.subjectId}`,{classId:x.classId,subjectId:x.subjectId,count:ids.length});
     return Response.json({ok:true,count:ids.length,isDefault:ids.length===0});
   }
  if(action==='observation'){ 
    if(user.role!=='TEACHER'&&user.role!=='ADMIN')throw new AppError('Teacher or administrator access required.',403);
-   const x=z.object({studentId:z.string().uuid(),classId:z.string().uuid(),date:z.iso.date(),category:z.enum(['Behaviour','Academic','Homework','Participation','Punctuality','Other']),severity:z.enum(['LOW','MODERATE','HIGH']),description:z.string().trim().min(5).max(1500),actionTaken:z.string().max(1000).optional(),followUpRequired:z.boolean()}).parse(raw.data);
+   const x=z.object({studentId:z.string().uuid(),classId:z.string().uuid(),date:z.iso.date(),category:z.enum(['Behaviour','Academic','Homework','Participation','Punctuality','Other']),severity:z.enum(['LOW','MODERATE','HIGH']),description:z.string().trim().min(5).max(1500),actionTaken:z.string().max(1000).optional(),followUpRequired:z.boolean(),teacherId:z.string().uuid().optional()}).parse(raw.data);
+   const {teacherId:namedTeacherId,...observationRow}=x;
    const org=await orgFor(user);
-   const t=user.role==='TEACHER'?await teacherFor(user):(await db.select().from(teachers).where(eq(teachers.organizationId,org.id)).limit(1))[0];
+   // Teachers file as themselves. An administrator either names the teacher who filed it or lands on
+   // that class's assigned teacher — never on an arbitrary row, which used to pollute someone's log.
+   let t=user.role==='TEACHER'?await teacherFor(user):null;
+   if(!t){
+     if(namedTeacherId){
+       const [named]=await db.select().from(teachers).where(and(eq(teachers.id,namedTeacherId),eq(teachers.organizationId,org.id)));
+       if(!named)throw new AppError('Teacher not found.',404);
+       t=named;
+     }else{
+       const [classTeacher]=await db.select({row:teachers}).from(assignments).innerJoin(teachers,eq(teachers.id,assignments.teacherId)).where(and(eq(assignments.organizationId,org.id),eq(assignments.classId,x.classId),eq(assignments.active,true),eq(teachers.active,true))).orderBy(teachers.name).limit(1);
+       if(!classTeacher)throw new AppError('No teacher is assigned to this class — pick who filed the observation.',400);
+       t=classTeacher.row;
+     }
+   }
    if(!t)throw new AppError('No teacher reference available.',400);
    if(user.role==='TEACHER'){const policy=await reportDatePolicy(org.id);if(!validLessonDate(x.date,schoolToday(org.timezone),policy.days))throw new AppError(`Observation date must be within the last ${reportWindowLabel(policy.days)}.`);}
    const [student]=await db.select().from(students).where(and(eq(students.id,x.studentId),eq(students.organizationId,org.id),eq(students.classId,x.classId),eq(students.status,'ACTIVE')));
@@ -545,7 +584,7 @@ export async function POST(req:Request){try{
      const [assigned]=await db.select().from(assignments).where(and(eq(assignments.organizationId,org.id),eq(assignments.teacherId,t.id),eq(assignments.classId,x.classId),eq(assignments.academicYearId,student.academicYearId),eq(assignments.active,true)));
      if(!assigned)throw new AppError('You are not assigned to this class.',403);
    }
-   const [result]=await db.insert(behaviourObservations).values({organizationId:org.id,teacherId:t.id,...x}).returning({id:behaviourObservations.id});
+    const [result]=await db.insert(behaviourObservations).values({organizationId:org.id,teacherId:t.id,...observationRow}).returning({id:behaviourObservations.id});
    await audit(org.id,user.id,'BEHAVIOUR_OBSERVATION_CREATED','behaviour_observation',result.id,{studentId:x.studentId,category:x.category});return Response.json({ok:true,id:result.id});
  }
  if(action==='resolveFollowUp'){
@@ -627,7 +666,7 @@ export async function POST(req:Request){try{
    return Response.json({ok:true,count:ids.length});
   }
   if(action==='saveClubActivity'){
-   const x=z.object({id:z.string().uuid().optional(),clubId:z.string().uuid(),title:z.string().trim().min(2).max(120),activityDate:z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])(?:-\d{2})?$/,'Activity month must look like 2026-10.'),description:z.string().max(2000).optional(),records:z.array(z.object({studentId:z.string().uuid(),punctuality:z.string().max(40).nullable().optional(),performance:z.string().max(40).nullable().optional(),participation:z.string().max(40).nullable().optional(),conduct:z.string().max(40).nullable().optional(),comment:z.string().max(1000).optional()})).max(300).optional()}).parse(raw.data);
+   const x=z.object({id:z.string().uuid().optional(),clubId:z.string().uuid(),title:z.string().trim().min(2).max(120),activityDate:z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])(?:-\d{2})?$/,'Activity month must look like 2026-10.'),description:z.string().max(2000).optional(),records:z.array(z.object({studentId:z.string().uuid(),punctuality:z.string().max(40).nullable().optional(),performance:z.string().max(40).nullable().optional(),participation:z.string().max(40).nullable().optional(),conduct:z.string().max(40).nullable().optional(),comment:z.string().max(1000).optional()})).max(2000).optional()}).parse(raw.data);
    const club=await loadClub(x.clubId);
    if(!await canManageClub(club.id))throw new AppError('You can only record activities for your own clubs.',403);
    if(club.active===false)throw new AppError('This club is inactive.',409);
@@ -676,7 +715,8 @@ export async function POST(req:Request){try{
    if(!['DRAFT','RETURNED'].includes(activity.status))throw new AppError('Only draft or returned activities can be submitted.',409);
    const memberIds=(await db.select({studentId:clubMembers.studentId}).from(clubMembers).where(eq(clubMembers.clubId,activity.clubId))).map(r=>r.studentId);
    if(!memberIds.length)throw new AppError('Add club members before submitting an activity.',400);
-   const rows=await db.select().from(clubActivityRecords).where(eq(clubActivityRecords.clubActivityId,activity.id)).limit(300);
+    // Same ceiling as the roster itself: a 300-row read could never satisfy a club over 300 members.
+    const rows=await db.select().from(clubActivityRecords).where(eq(clubActivityRecords.clubActivityId,activity.id)).limit(2100);
    const memberSet=new Set(memberIds);
    const byStudent=new Map(rows.filter(r=>memberSet.has(r.studentId)).map(r=>[r.studentId,r]));
    if(byStudent.size<memberIds.length)throw new AppError('Every club member needs a record before submitting.',400);
@@ -929,38 +969,47 @@ if(displaced.length){await db.update(assignments).set({active:false,updatedAt:ne
     const [t]=await db.select().from(teachers).where(and(eq(teachers.id,id),eq(teachers.organizationId,oid)));
     if(!t)throw new AppError('Teacher not found.',404);
     const username=x.username?.trim().toLowerCase()||undefined;
+    const email=x.email.trim().toLowerCase();
     if(username){
       if(username.length<3)throw new AppError('Username must be at least 3 characters.');
       if(!/^[a-z0-9._-]+$/.test(username))throw new AppError('Username may use letters, numbers, dot, dash or underscore.');
       const clashes=await db.select({id:users.id}).from(users).where(eq(users.username,username)).limit(5);
       if(clashes.some(c=>c.id!==t.userId))throw new AppError('That username is already in use.',409);
     }
+    // Same rule as creation: a duplicate email must surface as a clean 409, not a raw constraint error.
+    const emailClashes=await db.select({id:users.id}).from(users).where(eq(users.email,email)).limit(5);
+    if(emailClashes.some(c=>c.id!==t.userId))throw new AppError('That email address is already in use.',409);
     await runTransaction(async tx=>{
-      await tx.update(teachers).set({name:x.name,email:x.email.toLowerCase(),active:x.active,updatedAt:new Date()}).where(eq(teachers.id,id));
-      await tx.update(users).set({name:x.name,email:x.email.toLowerCase(),active:x.active,updatedAt:new Date(),...(username?{username}:{})}).where(and(eq(users.id,t.userId),eq(users.organizationId,oid)));
+      await tx.update(teachers).set({name:x.name,email,active:x.active,updatedAt:new Date()}).where(eq(teachers.id,id));
+      await tx.update(users).set({name:x.name,email,active:x.active,updatedAt:new Date(),...(username?{username}:{})}).where(and(eq(users.id,t.userId),eq(users.organizationId,oid)));
       if(!x.active)await tx.delete(sessions).where(eq(sessions.userId,t.userId));
     });
     if(username)await audit(oid,user.id,'USERNAME_CHANGED','user',t.userId,{username});
   }
   if(type==='class'){
     const x=z.object({name:z.string().min(1),active:z.boolean()}).parse(d);
-    await db.update(classes).set({...x,updatedAt:new Date()}).where(and(eq(classes.id,id),eq(classes.organizationId,oid)));
+    const [updated]=await db.update(classes).set({...x,updatedAt:new Date()}).where(and(eq(classes.id,id),eq(classes.organizationId,oid))).returning({id:classes.id});
+    if(!updated)throw new AppError('Class not found.',404);
   }
   if(type==='subject'){
     const x=z.object({name:z.string().min(2),code:z.string().min(2),active:z.boolean()}).parse(d);
-    await db.update(subjects).set({...x,code:x.code.toUpperCase(),updatedAt:new Date()}).where(and(eq(subjects.id,id),eq(subjects.organizationId,oid)));
+    const [updated]=await db.update(subjects).set({...x,code:x.code.toUpperCase(),updatedAt:new Date()}).where(and(eq(subjects.id,id),eq(subjects.organizationId,oid))).returning({id:subjects.id});
+    if(!updated)throw new AppError('Subject not found.',404);
   }
   if(type==='grade'){
     const x=z.object({name:z.string().min(2),orderIndex:z.coerce.number().int(),active:z.boolean()}).parse(d);
-    await db.update(grades).set(x).where(and(eq(grades.id,id),eq(grades.organizationId,oid)));
+    const [updated]=await db.update(grades).set(x).where(and(eq(grades.id,id),eq(grades.organizationId,oid))).returning({id:grades.id});
+    if(!updated)throw new AppError('Year not found.',404);
   }
   if(type==='year'){
     const x=z.object({name:z.string().min(3),startDate:z.string(),endDate:z.string(),active:z.boolean()}).parse(d);
-    await db.update(academicYears).set(x).where(and(eq(academicYears.id,id),eq(academicYears.organizationId,oid)));
+    const [updated]=await db.update(academicYears).set(x).where(and(eq(academicYears.id,id),eq(academicYears.organizationId,oid))).returning({id:academicYears.id});
+    if(!updated)throw new AppError('Academic year not found.',404);
   }
   if(type==='term'){
     const x=z.object({name:z.string().min(2),startDate:z.string(),endDate:z.string(),active:z.boolean()}).parse(d);
-    await db.update(terms).set(x).where(and(eq(terms.id,id),eq(terms.organizationId,oid)));
+    const [updated]=await db.update(terms).set(x).where(and(eq(terms.id,id),eq(terms.organizationId,oid))).returning({id:terms.id});
+    if(!updated)throw new AppError('Term not found.',404);
   }
   if(type==='assignment'){
     const x=z.object({teacherId:z.string().min(1).optional(),classId:z.string().min(1).optional(),subjectId:z.string().min(1).optional(),academicYearId:z.string().min(1).optional(),active:z.boolean().optional()}).parse(d);
@@ -1025,11 +1074,15 @@ if(displaced.length){await db.update(assignments).set({active:false,updatedAt:ne
     const [entry]=await db.select().from(monthlyEntries).where(and(eq(monthlyEntries.id,x.id),eq(monthlyEntries.organizationId,oid))).limit(1);
     if(!entry)throw new AppError('Report not found.',404);
     const transition=reviewTransition(entry.status,x.status,x.comment);
-    await db.update(monthlyEntries).set({status:transition.status,reviewComment:x.comment?.trim()||null,reviewedAt:new Date(),reviewedBy:user.id,updatedAt:new Date()}).where(and(eq(monthlyEntries.id,x.id),eq(monthlyEntries.organizationId,oid),eq(monthlyEntries.status,entry.status)));
+    const [moved]=await db.update(monthlyEntries).set({status:transition.status,reviewComment:x.comment?.trim()||null,reviewedAt:new Date(),reviewedBy:user.id,updatedAt:new Date()}).where(and(eq(monthlyEntries.id,x.id),eq(monthlyEntries.organizationId,oid),eq(monthlyEntries.status,entry.status))).returning({id:monthlyEntries.id});
+    // Optimistic concurrency: somebody else already moved this row, so the stale transition is refused.
+    if(!moved)throw new AppError('That report changed while you were reviewing it. Reload and try again.',409);
     await audit(oid,user.id,transition.auditAction,'monthly_entry',x.id,{previousStatus:entry.status,newStatus:transition.status,reason:x.comment});return Response.json({ok:true});
    }
    const transition=reviewTransition(old.status,x.status,x.comment);
-   await db.update(lessons).set({status:transition.status,reviewComment:x.comment?.trim()||null,reviewedAt:new Date(),reviewedBy:user.id,updatedAt:new Date()}).where(and(eq(lessons.id,x.id),eq(lessons.organizationId,oid),eq(lessons.status,old.status)));await audit(oid,user.id,transition.auditAction,'monthly_lesson',x.id,{previousStatus:old.status,newStatus:transition.status,reason:x.comment});return Response.json({ok:true});
+   const [moved]=await db.update(lessons).set({status:transition.status,reviewComment:x.comment?.trim()||null,reviewedAt:new Date(),reviewedBy:user.id,updatedAt:new Date()}).where(and(eq(lessons.id,x.id),eq(lessons.organizationId,oid),eq(lessons.status,old.status))).returning({id:lessons.id});
+   if(!moved)throw new AppError('That report changed while you were reviewing it. Reload and try again.',409);
+   await audit(oid,user.id,transition.auditAction,'monthly_lesson',x.id,{previousStatus:old.status,newStatus:transition.status,reason:x.comment});return Response.json({ok:true});
   }
   if(action==='settings'){
    const x=z.object({name:z.string().min(2).optional(),logoUrl:logoUrlSchema.optional().nullable(),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),excellentThreshold:z.coerce.number().min(1).max(3),goodThreshold:z.coerce.number().min(1).max(3),homeworkUsuallyThreshold:z.coerce.number().min(0).max(1),punctualityOccasionallyMax:z.coerce.number().min(0).max(1)}).parse(raw.data);
