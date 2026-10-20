@@ -839,9 +839,32 @@ export async function POST(req:Request){try{
      await tx.update(users).set({active:x.active,updatedAt:new Date()}).where(and(eq(users.id,target.userId),eq(users.organizationId,oid),eq(users.role,'TEACHER')));
      if(!x.active)await tx.delete(sessions).where(eq(sessions.userId,target.userId));
    });
-   await audit(oid,user.id,x.active?'ACCOUNT_ACTIVATED':'ACCOUNT_DEACTIVATED','teacher',target.id,{previous:target.active,new:x.active});return Response.json({ok:true});
- }
-  if(action==='import'){
+    await audit(oid,user.id,x.active?'ACCOUNT_ACTIVATED':'ACCOUNT_DEACTIVATED','teacher',target.id,{previous:target.active,new:x.active});return Response.json({ok:true});
+  }
+  /** Promotion: only the learners the administrator ticked move to the destination class; every
+   *  learner left unticked keeps their current class, grade and year. */
+  if(action==='promoteStudents'){
+    const x=z.object({fromClassId:z.string().uuid(),toClassId:z.string().uuid(),academicYearId:z.string().uuid(),studentIds:z.array(z.string().uuid()).min(1).max(500)}).parse(raw.data);
+    if(x.fromClassId===x.toClassId)throw new AppError('Choose a different destination class.',400);
+    const [fromRows,toRows]=await Promise.all([
+      db.select().from(classes).where(and(eq(classes.id,x.fromClassId),eq(classes.organizationId,oid))).limit(1),
+      db.select().from(classes).where(and(eq(classes.id,x.toClassId),eq(classes.organizationId,oid))).limit(1),
+    ]);
+    const fromClass=fromRows[0],toClass=toRows[0];
+    if(!fromClass||!toClass)throw new AppError('Class not found.',404);
+    if(toClass.academicYearId!==x.academicYearId)throw new AppError('That class is not in the academic year you selected.',400);
+    const [year]=await db.select().from(academicYears).where(and(eq(academicYears.id,x.academicYearId),eq(academicYears.organizationId,oid))).limit(1);
+    if(!year)throw new AppError('Academic year not found.',404);
+    const ids=[...new Set(x.studentIds)];
+    const roster=await db.select({id:students.id,fullName:students.fullName,studentId:students.studentId,status:students.status,classId:students.classId}).from(students).where(and(eq(students.organizationId,oid),inArray(students.id,ids)));
+    const skipped=roster.filter(s=>s.classId!==fromClass.id||s.status!=='ACTIVE').map(s=>s.fullName);
+    const movable=roster.filter(s=>s.classId===fromClass.id&&s.status==='ACTIVE');
+    if(!movable.length)throw new AppError(skipped.length?'None of those learners are active in this class.':'Select at least one learner.',400);
+    await db.update(students).set({classId:toClass.id,gradeId:toClass.gradeId,academicYearId:toClass.academicYearId,updatedAt:new Date()}).where(inArray(students.id,movable.map(s=>s.id)));
+    await audit(oid,user.id,'STUDENTS_PROMOTED','class',toClass.id,{fromClass:fromClass.name,toClass:toClass.name,year:year.name,count:movable.length,learners:movable.map(s=>s.fullName).slice(0,50)});
+    return Response.json({ok:true,moved:movable.length,skipped,fromClassName:fromClass.name,toClassName:toClass.name,year:year.name});
+  }
+   if(action==='import'){
    const input=z.object({kind:z.enum(['students','teachers','assignments']),rows:z.array(z.record(z.string(),z.unknown())).min(1).max(1000)}).parse(raw.data);
    const [loadedClasses,loadedGrades,loadedYears,loadedSubjects,allTeachers,loadedAssignments]=await Promise.all([db.select().from(classes).where(eq(classes.organizationId,oid)),db.select().from(grades).where(eq(grades.organizationId,oid)),db.select().from(academicYears).where(eq(academicYears.organizationId,oid)),db.select().from(subjects).where(eq(subjects.organizationId,oid)),db.select().from(teachers).where(eq(teachers.organizationId,oid)),db.select().from(assignments).where(eq(assignments.organizationId,oid))]);
    const allClasses=[...loadedClasses],allGrades=[...loadedGrades],allYears=[...loadedYears],allSubjects=[...loadedSubjects];

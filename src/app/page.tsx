@@ -448,6 +448,14 @@ export default function Home() {
   const [entity, setEntity] = useState('year');
   const [entityQuery, setEntityQuery] = useState('');
   const [form, setForm] = useState<Record<string, any>>({});
+  // Promotion: pick the class the learners are in now, tick the ones who passed, choose where
+  // they go next. Everyone left unticked stays where they are.
+  const [promoteFrom, setPromoteFrom] = useState('');
+  const [promoteTo, setPromoteTo] = useState('');
+  const [promoteYear, setPromoteYear] = useState('');
+  const [promoteRoster, setPromoteRoster] = useState<{ id: string; studentId: string; fullName: string; status: string }[]>([]);
+  const [promoteSelected, setPromoteSelected] = useState<string[]>([]);
+  const [promoteResult, setPromoteResult] = useState<string | null>(null);
   const [config, setConfig] = useState<{ settings: any; closures: { month: string; closed: boolean }[]; organization: any } | null>(null);
   const [organizations, setOrganizations] = useState<{ id: string; name: string; code: string; domain: string | null; logoUrl: string | null; timezone: string; active: boolean; primaryAdminUserId: string | null; studentCount?: number; teacherCount?: number; classCount?: number; admin?: { id: string; name: string; username: string; email: string } | null }[]>([]);
   const [orgForm, setOrgForm] = useState({ id: '', name: '', code: '', timezone: 'Africa/Bujumbura', domain: '', logoUrl: '/icons/school_logo.png', active: true });
@@ -635,6 +643,69 @@ export default function Home() {
     load();
     return () => ctrl.abort();
   }, [page, user, selectedClass, debouncedSearch, studentPage, studentSort, reportFilterClass, reportFilterSubject, reportFilterStatus, reportFilterPeriod.from, reportFilterPeriod.to, reportsNonce]);
+
+  // Promotion panel (Manage → Students): load the roster of the class the learners are in now.
+  useEffect(() => {
+    if (page !== 'manage' || entity !== 'student' || !promoteFrom) return;
+    const ctrl = new AbortController();
+    api('students', { classId: promoteFrom, roster: '1', sort: 'name', page: '0' }, { signal: ctrl.signal })
+      .then((d) => {
+        setPromoteRoster(d.students);
+        // Everyone moves by default; the administrator only unticks the few who stay behind.
+        setPromoteSelected(d.students.map((s: { id: string }) => s.id));
+      })
+      .catch((e) => {
+        if ((e as Error)?.name === 'AbortError') return;
+        setPromoteRoster([]);
+        setPromoteSelected([]);
+        setError((e as Error).message);
+      });
+    return () => ctrl.abort();
+  }, [page, entity, promoteFrom]);
+
+  const promoteLearners = () => {
+    if (!promoteFrom || !promoteTo || !promoteYear || !promoteSelected.length) return;
+    run(async () => {
+      const res = await post('promoteStudents', { fromClassId: promoteFrom, toClassId: promoteTo, academicYearId: promoteYear, studentIds: promoteSelected });
+      const skippedNote = res.skipped?.length
+        ? ` ${res.skipped.length} learner${res.skipped.length === 1 ? ' was' : 's were'} left behind because they are no longer active in that class.`
+        : '';
+      const stayed = promoteRoster.length - promoteSelected.length;
+      const stayedNote = stayed > 0 ? ` ${stayed} stayed in ${res.fromClassName}.` : '';
+      setPromoteResult(`${res.moved} learner${res.moved === 1 ? '' : 's'} moved from ${res.fromClassName} to ${res.toClassName} for ${res.year}.${stayedNote}${skippedNote}`);
+      setPromoteSelected([]);
+      const again = await api('students', { classId: promoteFrom, roster: '1', sort: 'name', page: '0' });
+      setPromoteRoster(again.students);
+      await refresh();
+    });
+  };
+
+  // Helpers for the promotion panel: which classes can receive this class's learners.
+  const promoteFromClass = (ref?.classes || []).find((c: any) => c.id === promoteFrom);
+  const promoteYearName = (ref?.years || []).find((y: any) => y.id === promoteYear)?.name || '';
+  const promoteDestOptions = (ref?.classes || []).filter(
+    (c: any) => c.active !== false && c.academicYearId === promoteYear && c.id !== promoteFrom
+  );
+  const pickPromoteClass = (value: string) => {
+    const cls = (ref?.classes || []).find((c: any) => c.id === value);
+    const yearId = cls?.academicYearId || '';
+    setPromoteFrom(value);
+    setPromoteYear(yearId);
+    // Same class name in the destination year is almost always the right target ("6" → "6").
+    const match = (ref?.classes || []).find(
+      (c: any) => c.active !== false && c.academicYearId === yearId && c.id !== value && c.name === cls?.name
+    );
+    setPromoteTo(match ? match.id : '');
+    setPromoteResult(null);
+  };
+  const pickPromoteYear = (value: string) => {
+    setPromoteYear(value);
+    const match = (ref?.classes || []).find(
+      (c: any) => c.active !== false && c.academicYearId === value && c.id !== promoteFrom && c.name === promoteFromClass?.name
+    );
+    setPromoteTo(match ? match.id : '');
+    setPromoteResult(null);
+  };
 
 
   const doLogin = (e: React.FormEvent) => {
@@ -2461,10 +2532,111 @@ export default function Home() {
                     </label>
                   ))}
                 </div>
-                <button className="btn primary" style={{ marginTop: 16 }} onClick={createEntity} disabled={busy}>
-                  <Plus size={16} /> Create {entityLabel(entity)}
-                </button>
+          <button className="btn primary" style={{ marginTop: 16 }} onClick={createEntity} disabled={busy}>
+            <Plus size={16} /> Create {entityLabel(entity)}
+          </button>
+        </div>
+
+        {/* PROMOTION: only the learners who are ticked move on; everyone else stays put */}
+        {entity === 'student' && (
+          <div className="panel form-panel" style={{ marginBottom: 20 }}>
+            <h3>Promote learners</h3>
+            <p style={{ fontSize: 12, color: '#748792', margin: '6px 0 0' }}>
+              Everyone in the class is ticked to move up. Untick the learners who are staying behind, then confirm.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12, marginTop: 14 }}>
+              <label>
+                From class
+                <select value={promoteFrom} onChange={(e) => pickPromoteClass(e.target.value)}>
+                  <option value="">Select a class</option>
+                  {(ref?.classes || []).filter((c: any) => c.active !== false).map((c: any) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Academic year they join
+                <select value={promoteYear} onChange={(e) => pickPromoteYear(e.target.value)} disabled={!promoteFrom}>
+                  <option value="">Select a year</option>
+                  {(ref?.years || []).filter((y: any) => y.active !== false).map((y: any) => (
+                    <option key={y.id} value={y.id}>{y.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                To class
+                <select value={promoteTo} onChange={(e) => { setPromoteTo(e.target.value); setPromoteResult(null); }} disabled={!promoteYear}>
+                  <option value="">Select the next class</option>
+                  {promoteDestOptions.map((c: any) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            {promoteFrom && (
+              <div style={{ marginTop: 16 }}>
+                {promoteRoster.length === 0 ? (
+                  <div className="empty" style={{ padding: 20 }}>
+                    <div className="empty-title">No active learners in this class</div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 10, flexWrap: 'wrap' }}>
+                      <strong style={{ fontSize: 13 }}>
+                        {promoteSelected.length} of {promoteRoster.length} learner{promoteRoster.length === 1 ? '' : 's'} moving up
+                      </strong>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button type="button" className="btn outline" style={{ height: 30, padding: '0 10px', fontSize: 11 }} onClick={() => setPromoteSelected(promoteRoster.map((s) => s.id))}>
+                          Move all
+                        </button>
+                        <button type="button" className="btn outline" style={{ height: 30, padding: '0 10px', fontSize: 11 }} onClick={() => setPromoteSelected([])}>
+                          None
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid #e8edf0', borderRadius: 9 }}>
+                      {promoteRoster.map((s) => (
+                        <label
+                          key={s.id}
+                          style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderBottom: '1px solid #f2f5f6', flexDirection: 'row', fontWeight: 500, fontSize: 12, color: '#40546a', cursor: 'pointer', margin: 0 }}
+                        >
+                          <input
+                            type="checkbox"
+                            style={{ width: 16, height: 16 }}
+                            checked={promoteSelected.includes(s.id)}
+                            onChange={(e) => setPromoteSelected((prev) => (e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id)))}
+                          />
+                          <span style={{ flex: 1 }}>{s.fullName}</span>
+                          <span style={{ fontSize: 11, color: '#94a3b8' }}>{s.studentId}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
+            )}
+
+            {promoteResult && (
+              <div className="notice-banner" style={{ background: '#f0fdf4', color: '#166534', marginTop: 14 }}>
+                {promoteResult}
+              </div>
+            )}
+
+            <button
+              className="btn primary"
+              style={{ marginTop: 14 }}
+              disabled={busy || !promoteFrom || !promoteTo || !promoteYear || promoteSelected.length === 0}
+              onClick={promoteLearners}
+            >
+              <GraduationCap size={15} />
+              {promoteSelected.length === 0
+                ? 'Promote learners'
+                : `Promote ${promoteSelected.length} learner${promoteSelected.length === 1 ? '' : 's'} to ${promoteDestOptions.find((c: any) => c.id === promoteTo)?.name || '…'}${promoteYearName ? ` (${promoteYearName})` : ''}`}
+            </button>
+          </div>
+        )}
+
 
               {/* Entity List with Edit, Deactivate & Reset Password Actions */}
               <div className="panel">

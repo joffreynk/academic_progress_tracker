@@ -438,6 +438,34 @@ async function main() {
   if (blankRow) tempRows.push({ kind: 'student', id: blankRow.id });
   const otherCodes = (afterImportBlank.body.students as any[]).map((s: any) => String(s.studentId)).filter((c: string) => c !== String(blankRow?.studentId ?? ''));
   check('a blank student ID in an import takes the next number', importBlank.status === 200 && !!blankRow && /^\d+$/.test(String(blankRow.studentId ?? '')) && Number(String(blankRow.studentId)) === highestStoredNumber(otherCodes) + 1, { import: importBlank.body, studentId: blankRow?.studentId, highestStored: highestStoredNumber(otherCodes) });
+
+  // Promotion: only the ticked learners move up, an inactive learner is skipped, and the rest stay.
+  await action('create', undefined, { type: 'class', data: { name: `TMP2-${suffix}`, gradeId: tempGrade?.id, academicYearId: activeYear.id } });
+  const promoRef = await call('/api/app?view=reference');
+  const destClassRow = (promoRef.body.classes as any[]).find((c) => c.name === `TMP2-${suffix}`);
+  if (destClassRow) tempRows.push({ kind: 'class', id: destClassRow.id });
+  await action('create', undefined, { type: 'student', data: { studentId: `PROMO-A-${suffix}`, firstName: 'Promo', lastName: `A${suffix}`, gradeId: tempGrade?.id, classId: tempClass?.id, academicYearId: activeYear.id } });
+  await action('create', undefined, { type: 'student', data: { studentId: `PROMO-B-${suffix}`, firstName: 'Promo', lastName: `B${suffix}`, gradeId: tempGrade?.id, classId: tempClass?.id, academicYearId: activeYear.id } });
+  const promoRef2 = await call('/api/app?view=reference');
+  const promoA = (promoRef2.body.students as any[]).find((s) => s.studentId === `PROMO-A-${suffix}`);
+  const promoB = (promoRef2.body.students as any[]).find((s) => s.studentId === `PROMO-B-${suffix}`);
+  if (promoA) tempRows.push({ kind: 'student', id: promoA.id });
+  if (promoB) tempRows.push({ kind: 'student', id: promoB.id });
+  // B changes school before the promotion, so ticking B must not move them anywhere.
+  if (promoB) await action('deleteEntity', undefined, { type: 'student', id: promoB.id });
+  const promote = await action('promoteStudents', { fromClassId: tempClass?.id, toClassId: destClassRow?.id, academicYearId: activeYear.id, studentIds: [promoA?.id, promoB?.id].filter(Boolean) as string[] });
+  const promoRef3 = await call('/api/app?view=reference');
+  const movedA = (promoRef3.body.students as any[]).find((s) => s.id === promoA?.id);
+  const stayedB = (promoRef3.body.students as any[]).find((s) => s.id === promoB?.id);
+  check('only the ticked, active learner moves to the next class', promote.status === 200 && !!movedA && movedA.classId === destClassRow?.id && stayedB?.classId === tempClass?.id, { promote: promote.body, a: movedA?.classId, b: stayedB?.classId });
+  check('a learner who left school is skipped and reported', promote.status === 200 && Array.isArray(promote.body.skipped) && promote.body.skipped.includes(promoB?.fullName) && promote.body.moved === 1, { skipped: promote.body.skipped, moved: promote.body.moved });
+  const promoteSame = await action('promoteStudents', { fromClassId: tempClass?.id, toClassId: tempClass?.id, academicYearId: activeYear.id, studentIds: [promoA?.id].filter(Boolean) as string[] });
+  check('promoting a class onto itself is refused', promoteSame.status >= 400, { body: promoteSame.body });
+  const promoYear = await action('create', undefined, { type: 'year', data: { name: `TMPY-${suffix}`, startDate: '2027-08-01', endDate: '2028-07-31' } });
+  const promoYearRow = (await call('/api/app?view=reference')).body.years.find((y: any) => y.name === `TMPY-${suffix}`);
+  if (promoYearRow) tempRows.push({ kind: 'year', id: promoYearRow.id });
+  const promoteWrongYear = await action('promoteStudents', { fromClassId: tempClass?.id, toClassId: destClassRow?.id, academicYearId: promoYearRow?.id, studentIds: [promoA?.id].filter(Boolean) as string[] });
+  check('a destination class outside the chosen year is refused', promoteWrongYear.status >= 400 && /academic year/i.test(String(promoteWrongYear.body?.error || promoteWrongYear.body?.message || '')), { status: promoteWrongYear.status, body: promoteWrongYear.body, created: promoYear.status });
   const assignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   const duplicateAssignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   check('assignment creation succeeds and duplicates are rejected', assignment.status === 200 && duplicateAssignment.status >= 400, { assignment: assignment.body, duplicate: duplicateAssignment.body });
