@@ -430,6 +430,14 @@ async function main() {
   if (autoTeacherRow) tempRows.push({ kind: 'teacher', id: autoTeacherRow.id });
   check('teacher ID is generated when none is entered', autoTeacher.status === 200 && !!autoTeacherRow && /^\d+$/.test(String(autoTeacherRow.teacherId || '')), { auto: autoTeacher.body, teacherId: autoTeacherRow?.teacherId });
   check('teacher ID continues from the highest number stored', Number(String(autoTeacherRow?.teacherId ?? '')) === highestStoredNumber(knownTeacherIds) + 1, { generated: autoTeacherRow?.teacherId, highestStored: highestStoredNumber(knownTeacherIds) });
+
+  // A blank Student ID in an import continues the same numbering instead of failing the row.
+  const importBlank = await action('import', { kind: 'students', rows: [{ 'Student Name': `Import Blank ${suffix}`, Class: tempClass?.name, 'Academic Year': activeYear.name }] });
+  const afterImportBlank = await call('/api/app?view=reference');
+  const blankRow = (afterImportBlank.body.students as any[]).find((s: any) => s.fullName === `Import Blank ${suffix}`);
+  if (blankRow) tempRows.push({ kind: 'student', id: blankRow.id });
+  const otherCodes = (afterImportBlank.body.students as any[]).map((s: any) => String(s.studentId)).filter((c: string) => c !== String(blankRow?.studentId ?? ''));
+  check('a blank student ID in an import takes the next number', importBlank.status === 200 && !!blankRow && /^\d+$/.test(String(blankRow.studentId ?? '')) && Number(String(blankRow.studentId)) === highestStoredNumber(otherCodes) + 1, { import: importBlank.body, studentId: blankRow?.studentId, highestStored: highestStoredNumber(otherCodes) });
   const assignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   const duplicateAssignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   check('assignment creation succeeds and duplicates are rejected', assignment.status === 200 && duplicateAssignment.status >= 400, { assignment: assignment.body, duplicate: duplicateAssignment.body });

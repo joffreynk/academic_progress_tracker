@@ -784,6 +784,18 @@ export async function POST(req:Request){try{
   // Logged with the offending action and role so production 403s can be traced to a screen.
   if(user.role!=='ADMIN'){console.error(`[api] blocked action=${action} role=${user.role} user=${user.id}`);throw new AppError('Administrator access required.',403);}
  const org=await orgFor(user);const oid=org.id;
+  /** Next person ID for an organization: the highest number already stored + 1, as a plain
+   *  number, so the list keeps counting 1, 2, 3 … rather than inventing a prefix or padding. */
+  const nextPersonCode = (existing: (string | null)[]) => {
+    let max = 0;
+    for (const raw of existing) {
+      const value = String(raw ?? '').trim();
+      if (!/^\d+$/.test(value)) continue;
+      const n = Number(value);
+      if (n > max) max = n;
+    }
+    return String(max + 1);
+  };
  if(action==='resetTeacherPassword'){
    const x=z.object({teacherId:z.string().uuid(),password:passwordSchema}).parse(raw.data);
    const [target]=await db.select().from(teachers).where(and(eq(teachers.id,x.teacherId),eq(teachers.organizationId,oid)));
@@ -839,7 +851,10 @@ export async function POST(req:Request){try{
     const assignmentIndex=new Map(loadedAssignments.map(a=>[`${a.teacherId}|${a.classId}|${a.subjectId}|${a.academicYearId}`,a]));
     // Teacher sign-in names come from the spreadsheet name column (lowercase); collisions get a numeric suffix.
     const claimedUsernames=new Set<string>();
-    const claimUsername=async(base:string)=>{const root=base||'teacher';let candidate=root;for(let n=2;;n++){const taken=claimedUsernames.has(candidate)||(await db.select({id:users.id}).from(users).where(eq(users.username,candidate)).limit(1)).length>0;if(!taken)break;candidate=`${root}${n}`;}claimedUsernames.add(candidate);return candidate;};
+     const claimUsername=async(base:string)=>{const root=base||'teacher';let candidate=root;for(let n=2;;n++){const taken=claimedUsernames.has(candidate)||(await db.select({id:users.id}).from(users).where(eq(users.username,candidate)).limit(1)).length>0;if(!taken)break;candidate=`${root}${n}`;}claimedUsernames.add(candidate);return candidate;};
+     // Codes already taken in this school: a blank Student ID in the sheet continues this sequence.
+     const studentCodes=(await db.select({v:students.studentId}).from(students).where(eq(students.organizationId,oid))).map(r=>r.v);
+     const teacherCodes=(await db.select({v:teachers.teacherId}).from(teachers).where(eq(teachers.organizationId,oid))).map(r=>r.v);
     const activeYear=()=>{const today=new Date().toISOString().slice(0,10);const active=allYears.filter(y=>y.active);const running=active.find(y=>(!y.startDate||y.startDate<=today)&&(!y.endDate||y.endDate>=today));if(running)return running;const latest=[...active].sort((a,b)=>String(b.startDate||'').localeCompare(String(a.startDate||'')))[0];return latest||allYears[0];};
     const ensureYear=async(name:string)=>{const digits=(v:string)=>v.replace(/\D/g,'');const want=digits(name);const found=allYears.find(y=>y.name.toLowerCase()===name.toLowerCase())||(want.length===8?allYears.find(y=>digits(y.name)===want):undefined);if(found)return found;const m=/^(\d{4})\s*[-–—]\s*(\d{4})$/.exec(name);if(!m)throw Error('Academic year does not exist in this school.');const [year]=await db.insert(academicYears).values({organizationId:oid,name:`${m[1]}-${m[2]}`,startDate:`${m[1]}-08-01`,endDate:`${m[2]}-07-31`,active:true}).returning();allYears.push(year);created.years++;return year;};
    const ensureGrade=async(name:string)=>{const found=allGrades.find(g=>g.name.toLowerCase()===name.toLowerCase());if(found)return found;const [grade]=await db.insert(grades).values({organizationId:oid,name,orderIndex:allGrades.length+1,active:true}).returning();allGrades.push(grade);created.grades++;return grade;};
@@ -850,15 +865,19 @@ export async function POST(req:Request){try{
    for(let i=0;i<input.rows.length;i++)try{
    const row=input.rows[i];
     if(input.kind==='students'){
-     const code=clean(row['Student ID']);const name=clean(row['Student Name']);const gradeName=clean(row['Year']||row['Grade']);const className=clean(row['Class']);const yearName=clean(row['Academic Year']);const statusRaw=clean(row['Status']).toUpperCase();
-     if(!code||!name||!className||(statusRaw&&!['ACTIVE','INACTIVE'].includes(statusRaw)))throw Error('Invalid student ID, name or class.');
+      let code=clean(row['Student ID']);const name=clean(row['Student Name']);const gradeName=clean(row['Year']||row['Grade']);const className=clean(row['Class']);const yearName=clean(row['Academic Year']);const statusRaw=clean(row['Status']).toUpperCase();
+      // A blank Student ID continues the school's own sequence (if the last ID stored is 30,
+      // the next row is 31) instead of failing the row.
+      if(!code)code=nextPersonCode(studentCodes);
+      if(!name||!className||(statusRaw&&!['ACTIVE','INACTIVE'].includes(statusRaw)))throw Error('Invalid student name or class.');
      const y=yearName?await ensureYear(yearName):activeYear();if(!y)throw Error('Create an academic year before importing students.');
      // The stored class is the source of truth for the grade so the two can never disagree.
      let c=allClasses.find(x=>x.name.toLowerCase()===className.toLowerCase()&&x.academicYearId===y.id);
      if(!c){const g=await ensureGrade(gradeName||gradeNameForClass(className));c=await ensureClass(className,g.id,y.id);}
      const parts=name.split(/\s+/);const firstName=parts.shift()||name,lastName=parts.join(' ')||'—';const [old]=await db.select().from(students).where(and(eq(students.organizationId,oid),eq(students.studentId,code)));
      if(old){await db.update(students).set({firstName,lastName,fullName:name,gradeId:c.gradeId,classId:c.id,academicYearId:y.id,...(statusRaw?{status:statusRaw}:{}),updatedAt:new Date()}).where(eq(students.id,old.id));updated++;}
-     else{const status=statusRaw||'ACTIVE';await db.insert(students).values({organizationId:oid,studentId:code,firstName,lastName,fullName:name,gradeId:c.gradeId,classId:c.id,academicYearId:y.id,status});imported++;}
+      else{const status=statusRaw||'ACTIVE';await db.insert(students).values({organizationId:oid,studentId:code,firstName,lastName,fullName:name,gradeId:c.gradeId,classId:c.id,academicYearId:y.id,status});imported++;}
+      if(!studentCodes.includes(code))studentCodes.push(code);
     }else if(input.kind==='teachers'){
      const keys=Object.keys(row).map(k=>k.trim().toUpperCase());const has=(list:string[])=>list.some(k=>keys.includes(k));
      const hasRosterColumns=(has(['SUBJECTS'])&&has(['CLASSES']))||(has(['NO'])&&has(['NAME'])&&has(['SURNAME']));
@@ -868,7 +887,9 @@ export async function POST(req:Request){try{
       if(!teacherName)throw Error('Teacher row requires a name.');
       const parsedEmail=z.email().safeParse(roster.email.toLowerCase());const hasEmail=parsedEmail.success;
       let teacherId=roster.teacherId;
-      if(!teacherId||teacherId==='AUTO-TEACHER')teacherId=hasEmail?`T-${roster.email.split('@')[0]}`:`T-${teacherName.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,24)}`;
+      // No code in the sheet means "give me the next number", the same rule as creating one
+      // by hand: the last stored ID of 30 is followed by 31.
+      if(!teacherId||teacherId==='AUTO-TEACHER')teacherId=nextPersonCode(teacherCodes);
       const email=hasEmail?parsedEmail.data:'';
       const [byCode]=await db.select().from(teachers).where(and(eq(teachers.organizationId,oid),eq(teachers.teacherId,teacherId))).limit(1);
       const byEmail=hasEmail?(await db.select().from(teachers).where(and(eq(teachers.organizationId,oid),eq(teachers.email,email))).limit(1))[0]:undefined;
@@ -891,6 +912,7 @@ export async function POST(req:Request){try{
        });
        credentials.push({teacherId,name:teacherName,email:finalEmail,username,password,emailProvided:hasEmail});
        imported++;
+       if(!teacherCodes.includes(teacherId))teacherCodes.push(teacherId);
       }
       if(roster.subjects.length&&roster.classes.length&&teacherRecord){
        const record=teacherRecord;const yearRecord=activeYear();if(!yearRecord)throw Error('Create an academic year before importing teacher assignments.');
@@ -907,15 +929,18 @@ export async function POST(req:Request){try{
        }
       }
      }else{
-      const teacherId=clean(row['Teacher ID']),name=clean(row['Teacher Name']),email=clean(row['Email']).toLowerCase();if(!teacherId||!name||!z.email().safeParse(email).success)throw Error('Invalid teacher ID, name or email.');
+      let teacherId=clean(row['Teacher ID']),name=clean(row['Teacher Name']),email=clean(row['Email']).toLowerCase();
+      // A blank code means "next number", the same rule as creating a teacher by hand.
+      if(!teacherId)teacherId=nextPersonCode(teacherCodes);
+      if(!name||!z.email().safeParse(email).success)throw Error('Invalid teacher name or email.');
       const [old]=await db.select().from(teachers).where(and(eq(teachers.organizationId,oid),eq(teachers.teacherId,teacherId)));
       if(old){await runTransaction(async tx=>{await tx.update(users).set({name,email,updatedAt:new Date()}).where(and(eq(users.id,old.userId),eq(users.organizationId,oid)));await tx.update(teachers).set({name,email,updatedAt:new Date()}).where(eq(teachers.id,old.id));});updated++;}
-      else{const password=initialTeacherPassword();const username=await claimUsername(usernameFromName(name)||`t${teacherId}`);const passwordHash=await hash(password,8);await runTransaction(async tx=>{const [u]=await tx.insert(users).values({organizationId:oid,name,email,username,passwordHash,role:'TEACHER'}).returning();await tx.insert(teachers).values({organizationId:oid,userId:u.id,teacherId,name,email});});credentials.push({teacherId,name,email,username,password,emailProvided:true});imported++;}
+      else{const password=initialTeacherPassword();const username=await claimUsername(usernameFromName(name)||`t${teacherId}`);const passwordHash=await hash(password,8);await runTransaction(async tx=>{const [u]=await tx.insert(users).values({organizationId:oid,name,email,username,passwordHash,role:'TEACHER'}).returning();await tx.insert(teachers).values({organizationId:oid,userId:u.id,teacherId,name,email});});credentials.push({teacherId,name,email,username,password,emailProvided:true});imported++;if(!teacherCodes.includes(teacherId))teacherCodes.push(teacherId);}
      }
    }else{
     const email=clean(row['Teacher Email']).toLowerCase(),className=clean(row['Class']),subjectName=clean(row['Subject']),yearName=clean(row['Academic Year']);const t=allTeachers.find(x=>x.email.toLowerCase()===email),y=allYears.find(x=>x.name===yearName),c=allClasses.find(x=>x.name.toLowerCase()===className.toLowerCase()&&x.academicYearId===y?.id),s=allSubjects.find(x=>x.name.toLowerCase()===subjectName.toLowerCase());if(!t||!y||!c||!s)throw Error('Teacher, class, subject or year not found in this organization.');const [old]=await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,t.id),eq(assignments.classId,c.id),eq(assignments.subjectId,s.id),eq(assignments.academicYearId,y.id)));const active=!['NO','FALSE','INACTIVE','0'].includes(clean(row['Active']).toUpperCase());if(old){await db.update(assignments).set({active,updatedAt:new Date()}).where(eq(assignments.id,old.id));updated++;}else{await db.insert(assignments).values({organizationId:oid,teacherId:t.id,classId:c.id,subjectId:s.id,academicYearId:y.id,active});imported++;}
    }
-  }catch(e){const message=e instanceof Error?e.message:'';const known=['Invalid student ID, name or class.','Academic year does not exist in this school.','Create an academic year before importing students.','Create an academic year before importing teacher assignments.','Teacher row requires a name.','Invalid teacher ID, name or email.','Teacher, class, subject or year not found in this organization.'];
+  }catch(e){const message=e instanceof Error?e.message:'';const known=['Invalid student name or class.','Academic year does not exist in this school.','Create an academic year before importing students.','Create an academic year before importing teacher assignments.','Teacher row requires a name.','Invalid teacher name or email.','Teacher, class, subject or year not found in this organization.'];
    let reason=known.includes(message)?message:'Could not import this row. Check duplicate IDs, email addresses and values.';
    if(/constraint failed/i.test(message))reason='A record with this student ID or email address already exists.';
    const label=input.kind==='students'?clean(input.rows[i]['Student ID'])||clean(input.rows[i]['Student Name']):clean(input.rows[i]['Teacher ID'])||clean(input.rows[i]['Teacher Name'])||clean(input.rows[i]['Teacher Email']);
@@ -923,18 +948,6 @@ export async function POST(req:Request){try{
    await audit(oid,user.id,'DATA_IMPORT',input.kind,undefined,{imported,updated,errors:errors.length,credentials:credentials.length,assignments:assignmentsCreated,created});
    return Response.json({imported,updated,skipped:errors.length,errors,credentials,created,assignments:{created:assignmentsCreated,updated:assignmentsUpdated}});
  }
-  /** Next person ID for an organization: the highest number already stored + 1, as a plain
-   *  number, so the list keeps counting 1, 2, 3 … rather than inventing a prefix or padding. */
-  const nextPersonCode = (existing: (string | null)[]) => {
-    let max = 0;
-    for (const raw of existing) {
-      const value = String(raw ?? '').trim();
-      if (!/^\d+$/.test(value)) continue;
-      const n = Number(value);
-      if (n > max) max = n;
-    }
-    return String(max + 1);
-  };
   if(action==='create'){
    const type=z.enum(['year','term','grade','class','subject','student','teacher','assignment']).parse(raw.type);const d=raw.data; let entityId=''; let reassignedFrom:string[]=[];
   if(type==='year'){const x=z.object({name:z.string().min(3),startDate:z.string(),endDate:z.string()}).parse(d);const [r]=await db.insert(academicYears).values({...x,organizationId:oid}).returning();entityId=r.id;}
