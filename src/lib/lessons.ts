@@ -7,7 +7,7 @@ import { loadSubjectRoster } from './roster';
 import type { users } from '@/db/schema';
 
 const studentRecord = z.object({studentId:z.string(),attendanceStatus:z.enum(['PRESENT','LATE','ABSENT']),performance:z.enum(['EXCELLENT','GOOD','NEEDS_IMPROVEMENT']).nullable().optional(),conduct:z.enum(['EXCELLENT','GOOD','NEEDS_IMPROVEMENT']).nullable().optional(),punctuality:z.enum(['ALWAYS_ON_TIME','OCCASIONALLY_LATE','FREQUENTLY_LATE']).nullable().optional(),homework:z.enum(['ALWAYS_COMPLETED','USUALLY_COMPLETED','RARELY_COMPLETED']).nullable().optional(),participation:z.enum(['ACTIVE','MODERATE','PASSIVE']).nullable().optional(),comment:z.string().max(1000).nullable().optional()});
-export const lessonInput = z.object({id:z.string().optional(),classId:z.string(),subjectId:z.string(),academicYearId:z.string(),lessonDate:z.string(),topic:z.string().max(250),submit:z.boolean(),records:z.array(studentRecord).max(150)});
+export const lessonInput = z.object({id:z.string().optional(),classId:z.string(),subjectId:z.string(),academicYearId:z.string(),lessonDate:z.string(),topic:z.string().max(250),submit:z.boolean(),records:z.array(studentRecord).max(200)});
 export async function saveMonthlyRecord(user: typeof users.$inferSelect, raw: unknown) {
  const data=lessonInput.parse(raw); const org=await orgFor(user); const teacher=await teacherFor(user); const today=schoolToday(org.timezone);
  // Admin configures how many days back reports may be dated (§39); that value is the limit teachers work to.
@@ -38,7 +38,17 @@ for(const r of data.records) {
  if(data.id && (!existing || existing.id!==data.id)) throw new AppError('Report not found.',404);
  if(existing && !['DRAFT','RETURNED'].includes(existing.status)) throw new AppError('This report cannot be edited.',403);
  const result=await runTransaction(async tx=>{
-  const [lesson]=existing ? await tx.update(lessons).set({topic:data.topic.trim(),status:data.submit?'SUBMITTED':'DRAFT',termId:term.id,updatedAt:new Date(),submittedAt:data.submit?new Date():null,reviewComment:data.submit?null:existing.reviewComment}).where(eq(lessons.id,existing.id)).returning() : await tx.insert(lessons).values({organizationId:org.id,teacherId:teacher.id,classId:klass.id,subjectId:subject.id,academicYearId:year.id,termId:term.id,classNameSnapshot:klass.name,subjectNameSnapshot:subject.name,teacherNameSnapshot:teacher.name,academicYearNameSnapshot:year.name,lessonDate:data.lessonDate,topic:data.topic.trim(),status:data.submit?'SUBMITTED':'DRAFT',submittedAt:data.submit?new Date():null}).returning();
+  let lesson:{id:string};
+  if(existing){
+   // Optimistic concurrency: if another tab submitted this report since we read it, refuse instead
+   // of silently reverting it to a draft.
+   const moved=await tx.update(lessons).set({topic:data.topic.trim(),status:data.submit?'SUBMITTED':'DRAFT',termId:term.id,updatedAt:new Date(),submittedAt:data.submit?new Date():null,reviewComment:data.submit?null:existing.reviewComment}).where(and(eq(lessons.id,existing.id),eq(lessons.status,existing.status))).returning();
+   if(!moved.length)throw new AppError('That report changed while you were editing it. Reload and try again.',409);
+   lesson=moved[0];
+  }else{
+   const [created]=await tx.insert(lessons).values({organizationId:org.id,teacherId:teacher.id,classId:klass.id,subjectId:subject.id,academicYearId:year.id,termId:term.id,classNameSnapshot:klass.name,subjectNameSnapshot:subject.name,teacherNameSnapshot:teacher.name,academicYearNameSnapshot:year.name,lessonDate:data.lessonDate,topic:data.topic.trim(),status:data.submit?'SUBMITTED':'DRAFT',submittedAt:data.submit?new Date():null}).returning();
+   lesson=created;
+  }
 for(const r of data.records){
     const absent=r.attendanceStatus==='ABSENT';
     await tx.insert(records).values({organizationId:org.id,monthlyLessonId:lesson.id,studentId:r.studentId,studentNameSnapshot:rosterById.get(r.studentId)!.studentName,studentCodeSnapshot:rosterById.get(r.studentId)!.studentCode,attendanceStatus:r.attendanceStatus,performance:absent?null:r.performance||null,conduct:absent?null:r.conduct||null,punctuality:absent?null:r.punctuality||null,homework:absent?null:r.homework||null,participation:absent?null:r.participation||null,comment:r.comment?.trim()||null}).onConflictDoUpdate({target:[records.monthlyLessonId,records.studentId],set:{attendanceStatus:r.attendanceStatus,performance:absent?null:r.performance||null,conduct:absent?null:r.conduct||null,punctuality:absent?null:r.punctuality||null,homework:absent?null:r.homework||null,participation:absent?null:r.participation||null,comment:r.comment?.trim()||null,updatedAt:new Date()}});

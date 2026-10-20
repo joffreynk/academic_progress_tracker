@@ -487,15 +487,16 @@ export default function MonthlyEntryView({
                 <div>
                   <h2 style={{ fontSize: 14 }}>Students taking {form.subjectName}</h2>
                   <p>
-                    {rosterEditor.selected.length} of {rosterEditor.students.length} class students selected.
-                    {rosterEditor.selected.length === rosterEditor.students.length ? ' Saving this selection keeps the whole class.' : ' Only the selected students appear on this record.'}
+                    {rosterEditor.selected.length === 0
+                      ? <>Whole class ({rosterEditor.students.length} students).</>
+                      : <>{rosterEditor.selected.length} of {rosterEditor.students.length} class students selected.{rosterEditor.selected.length === rosterEditor.students.length ? ' Saving this selection keeps the whole class.' : ' Only the selected students appear on this record.'}</>}
                   </p>
                 </div>
                 <button className="icon-link" onClick={() => setRosterEditor(null)} title="Close" aria-label="Close roster editor"><X size={18} /></button>
               </div>
               <div className="search-box" style={{ marginBottom: 10 }}>
                 <Search size={15} />
-                <input value={rosterEditor.search} onChange={(e) => setRosterEditor({ ...rosterEditor, search: e.target.value })} placeholder="Search name or student ID" />
+                <input value={rosterEditor.search} onChange={(e) => setRosterEditor({ ...rosterEditor, search: e.target.value })} placeholder="Search name or student ID" aria-label="Search roster students by name or ID" />
               </div>
               <div style={{ maxHeight: 260, overflowY: 'auto', border: '1px solid #ebeff1', borderRadius: 9, padding: 10 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 6 }}>
@@ -517,7 +518,7 @@ export default function MonthlyEntryView({
                 <button
                   className="btn outline"
                   style={{ padding: '5px 10px', fontSize: 12 }}
-                  disabled={!rosterEditor.selected.length || rosterEditor.saving}
+                  disabled={rosterEditor.selected.length === 0 || rosterEditor.selected.length === rosterEditor.students.length || rosterEditor.saving}
                   onClick={() => setRosterEditor({ ...rosterEditor, selected: [] })}
                 >
                   Use whole class

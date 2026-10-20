@@ -51,19 +51,31 @@ export default function StudentProfileModal({
   const [activeTab, setActiveTab] = useState<'overview' | 'records' | 'trends' | 'attendance' | 'behaviour'>('overview');
   const [trends, setTrends] = useState<MonthlyTrend[]>([]);
   const [loadingTrends, setLoadingTrends] = useState(false);
+  const [trendsError, setTrendsError] = useState<string | null>(null);
+  const [triedTrends, setTriedTrends] = useState(false);
 
   useEffect(() => {
-    if (activeTab === 'trends' && trends.length === 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- loading flag for the trends fetch
-      setLoadingTrends(true);
-      api('trends', { studentId: data.student.id })
-        .then((res) => {
-          if (res?.trends) setTrends(res.trends);
-        })
-        .catch(() => {})
-        .finally(() => setLoadingTrends(false));
-    }
-  }, [activeTab, data.student.id, trends.length, api]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (activeTab !== 'trends' || triedTrends) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loading flag for the trends fetch
+    setLoadingTrends(true);
+    setTrendsError(null);
+    setTriedTrends(true);
+    api('trends', { studentId: data.student.id })
+      .then((res) => {
+        if (res?.trends) setTrends(res.trends);
+      })
+      // A failure must say so: "no data" would be a claim we cannot back up.
+      .catch((e) => setTrendsError((e as Error).message))
+      .finally(() => setLoadingTrends(false));
+  }, [activeTab, triedTrends, data.student.id, api]);
 
   const { student, timeline, significant } = data;
 
@@ -217,6 +229,14 @@ export default function StudentProfileModal({
               </p>
               {loadingTrends ? (
                 <p>Loading multi-month trend analysis...</p>
+              ) : trendsError ? (
+                <div className="empty">
+                  <div className="empty-title">Could not load trend data</div>
+                  <div className="empty-detail">{trendsError}</div>
+                  <button type="button" className="btn outline" style={{ marginTop: 12 }} onClick={() => setTriedTrends(false)}>
+                    Try again
+                  </button>
+                </div>
               ) : trends.length === 0 ? (
                 <p style={{ color: '#748792' }}>No multi-month data available yet for this student.</p>
               ) : (

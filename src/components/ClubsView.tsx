@@ -209,9 +209,10 @@ export default function ClubsView({
 
   const fillAllRecords = () => {
     if (!activityForm) return;
-    const next: Record<string, MemberRecord> = {};
-    Object.keys(activityForm.records).forEach((id) => {
-      next[id] = defaultRecord();
+    const next: Record<string, MemberRecord> = { ...activityForm.records };
+    Object.keys(next).forEach((id) => {
+      // Normalise the four level fields only — comments and anything already typed must survive.
+      next[id] = { ...next[id], punctuality: 'ALWAYS_ON_TIME', performance: 'GOOD', participation: 'ACTIVE', conduct: 'GOOD' };
     });
     setActivityForm({ ...activityForm, records: next });
   };
@@ -436,7 +437,7 @@ export default function ClubsView({
             </div>
             <div className="search-box">
               <Search size={15} />
-              <input value={studentSearch} onChange={(e) => setStudentSearch(e.target.value)} placeholder="Search name or student ID" />
+              <input value={studentSearch} onChange={(e) => setStudentSearch(e.target.value)} placeholder="Search name or student ID" aria-label="Search club students by name or ID" />
             </div>
           </div>
           <div style={{ maxHeight: 260, overflowY: 'auto', border: '1px solid #ebeff1', borderRadius: 9, padding: 10 }}>
@@ -664,7 +665,7 @@ export default function ClubsView({
                       <div style={{ marginTop: 10, border: '1px solid #ebeff1', borderRadius: 9, padding: 10 }}>
                         <div className="search-box" style={{ marginBottom: 8 }}>
                           <Search size={15} />
-                          <input value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)} placeholder="Search name or student ID" />
+                          <input value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)} placeholder="Search name or student ID" aria-label="Search club members by name or ID" />
                         </div>
                         <div style={{ maxHeight: 220, overflowY: 'auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 6 }}>
                           {filteredMemberOptions.map((s) => (

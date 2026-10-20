@@ -305,7 +305,7 @@ type OverviewData = {
   today: string;
   minDate: string;
   windowDays: number;
-  counts: { students: number; teachers: number; classes: number; subjects: number; totalReports: number };
+  counts: { students: number; teachers: number; classes: number; subjects: number; totalReports: number; reports?: Record<string, number>; reportsThisMonth?: number; approvalRate?: number; followUpsRequired?: number; teacherMonthClasses?: number; teacherMonthSubjects?: number };
   statusCounts: Record<string, number>;
   assignedClasses: string[];
   assignedSubjects: string[];
@@ -349,6 +349,19 @@ function Empty({ title, detail }: { title: string; detail: string }) {
     <div className="empty">
       <div className="empty-title">{title}</div>
       <div className="empty-detail">{detail}</div>
+    </div>
+  );
+}
+
+// A failed load must offer a way out — a spinner that never ends tells the user nothing.
+function LoadErrorPanel({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="empty">
+      <div className="empty-title">Could not load this view</div>
+      <div className="empty-detail">{message}</div>
+      <button type="button" className="btn outline" style={{ marginTop: 14 }} onClick={onRetry}>
+        <RefreshCw size={14} /> Try again
+      </button>
     </div>
   );
 }
@@ -442,9 +455,11 @@ export default function Home() {
   const [search, setSearch] = useState('');
   // Typing a name should not fire a request per keystroke; the list waits for this to settle.
   const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+const [notice, setNotice] = useState<string | null>(null);
+const [error, setError] = useState<string | null>(null);
+// A failed first load must stay on screen (the toast fades) or the view looks permanently stuck loading.
+const [loadError, setLoadError] = useState<string | null>(null);
+const [busy, setBusy] = useState(false);
   const [entity, setEntity] = useState('year');
   const [entityQuery, setEntityQuery] = useState('');
   const [form, setForm] = useState<Record<string, any>>({});
@@ -454,6 +469,7 @@ export default function Home() {
   const [promoteTo, setPromoteTo] = useState('');
   const [promoteYear, setPromoteYear] = useState('');
   const [promoteRoster, setPromoteRoster] = useState<{ id: string; studentId: string; fullName: string; status: string }[]>([]);
+  const [promoteRosterLoading, setPromoteRosterLoading] = useState(false);
   const [promoteSelected, setPromoteSelected] = useState<string[]>([]);
   const [promoteResult, setPromoteResult] = useState<string | null>(null);
   const [config, setConfig] = useState<{ settings: any; closures: { month: string; closed: boolean }[]; organization: any } | null>(null);
@@ -514,6 +530,7 @@ export default function Home() {
   };
 
   const refresh = async () => {
+    setLoadError(null);
     const [o, r] = await Promise.all([api('overview'), api('reference').catch(() => null)]);
     setOverview(normalizeOverview(o));
     const today = o?.today || r?.today;
@@ -527,9 +544,14 @@ export default function Home() {
   };
 
   useEffect(() => {
+    // A failed request must not look like an endless "loading session" spinner.
     fetch('/api/auth')
-      .then((r) => r.json())
-      .then((d) => setUser(d.user))
+      .then(async (r) => {
+        if (!r.ok) return null;
+        const d = await r.json();
+        return d.user ?? null;
+      })
+      .then((u) => setUser(u))
       .catch(() => setUser(null));
   }, []);
 
@@ -566,8 +588,8 @@ export default function Home() {
   useEffect(() => {
     if (!user) return;
     api('overview')
-      .then((o) => setOverview(normalizeOverview(o)))
-      .catch((e) => setError(e.message));
+      .then((o) => { setOverview(normalizeOverview(o)); setLoadError(null); })
+      .catch((e) => { setError(e.message); setLoadError(e.message); });
     api('reference')
       .then((r) => {
         if (r) {
@@ -578,7 +600,7 @@ export default function Home() {
       })
       // Without the reference data every picker is empty, so a silent catch here would leave the
       // whole app looking broken for no visible reason.
-      .catch((e) => setError(e.message));
+      .catch((e) => { setError(e.message); setLoadError(e.message); });
   }, [user, overview?.today]);
 
   // Search-as-you-type: hold the request until typing settles, and restart pagination whenever
@@ -637,7 +659,15 @@ export default function Home() {
       } catch (e) {
         // An aborted call is the effect being cleaned up, not something worth telling the user.
         if ((e as Error)?.name === 'AbortError') return;
-        setError((e as Error).message);
+        const message = (e as Error).message;
+        setError(message);
+        setLoadError(message);
+        // Never keep the previous cohort's rows on screen under a filter that just failed to load.
+        if (page === 'reports') setReports([]);
+        if (page === 'students') { setStudents([]); setStudentsHasMore(false); }
+        if (page === 'organizations') setOrganizations([]);
+        if (page === 'audit') setAuditLogs([]);
+        if (page === 'settings' && user.role === 'ADMIN') setConfig(null);
       }
     };
     load();
@@ -653,11 +683,13 @@ export default function Home() {
         setPromoteRoster(d.students);
         // Everyone moves by default; the administrator only unticks the few who stay behind.
         setPromoteSelected(d.students.map((s: { id: string }) => s.id));
+        setPromoteRosterLoading(false);
       })
       .catch((e) => {
         if ((e as Error)?.name === 'AbortError') return;
         setPromoteRoster([]);
         setPromoteSelected([]);
+        setPromoteRosterLoading(false);
         setError((e as Error).message);
       });
     return () => ctrl.abort();
@@ -673,25 +705,39 @@ export default function Home() {
       const stayed = promoteRoster.length - promoteSelected.length;
       const stayedNote = stayed > 0 ? ` ${stayed} stayed in ${res.fromClassName}.` : '';
       setPromoteResult(`${res.moved} learner${res.moved === 1 ? '' : 's'} moved from ${res.fromClassName} to ${res.toClassName} for ${res.year}.${stayedNote}${skippedNote}`);
-      setPromoteSelected([]);
       const again = await api('students', { classId: promoteFrom, roster: '1', sort: 'name', page: '0' });
+      // Re-tick the remaining learners so the next class can be promoted without pressing "Move all".
       setPromoteRoster(again.students);
+      setPromoteSelected(again.students.map((s: { id: string }) => s.id));
       await refresh();
     });
   };
 
-  // Helpers for the promotion panel: which classes can receive this class's learners.
+  // Helpers for the promotion panel: promotion normally lands in the year after the source class's,
+  // and the destination class is matched by name across years ("6" in 2026-2027 → "6" in 2027-2028).
+  const promoteYearsSorted = [...(ref?.years || [])]
+    .filter((y: any) => y.active !== false)
+    .sort((a: any, b: any) => String(a.startDate || a.name).localeCompare(String(b.startDate || b.name)));
+  const promoteYearLabel = (id: string) => promoteYearsSorted.find((y: any) => y.id === id)?.name || '';
   const promoteFromClass = (ref?.classes || []).find((c: any) => c.id === promoteFrom);
-  const promoteYearName = (ref?.years || []).find((y: any) => y.id === promoteYear)?.name || '';
+  const promoteYearName = promoteYearLabel(promoteYear);
   const promoteDestOptions = (ref?.classes || []).filter(
     (c: any) => c.active !== false && c.academicYearId === promoteYear && c.id !== promoteFrom
   );
+  const promoteDefaultYearFor = (cls: any) => {
+    if (!cls) return '';
+    const idx = promoteYearsSorted.findIndex((y: any) => y.id === cls.academicYearId);
+    return idx >= 0 ? promoteYearsSorted[idx + 1]?.id || cls.academicYearId : cls.academicYearId;
+  };
   const pickPromoteClass = (value: string) => {
     const cls = (ref?.classes || []).find((c: any) => c.id === value);
-    const yearId = cls?.academicYearId || '';
+    const yearId = promoteDefaultYearFor(cls);
     setPromoteFrom(value);
     setPromoteYear(yearId);
-    // Same class name in the destination year is almost always the right target ("6" → "6").
+    // Drop the previous cohort immediately so its ticks are never shown against the new class.
+    setPromoteRoster([]);
+    setPromoteSelected([]);
+    setPromoteRosterLoading(true);
     const match = (ref?.classes || []).find(
       (c: any) => c.active !== false && c.academicYearId === yearId && c.id !== value && c.name === cls?.name
     );
@@ -785,6 +831,8 @@ export default function Home() {
 
   // Open a legacy dated report read-only (capture UI is monthly-only after the merge)
   const openLesson = (id: string) => {
+    // Only one review drawer at a time — otherwise two panels stack and both stay clickable.
+    setMonthlyReviewDetail(null);
     run(async () => {
       setReviewDetail(await api('monthlyLesson', { id }));
     });
@@ -798,6 +846,7 @@ export default function Home() {
       setPage('monthlyRecord');
       return;
     }
+    setReviewDetail(null);
     run(async () => {
       setMonthlyReviewDetail(await api('monthlyEntry', { entryId: r.id }));
     });
@@ -866,6 +915,9 @@ export default function Home() {
       onConfirm: () => {
         run(async () => {
           await post('deleteDraft', { id });
+          // The deleted record must not stay open in a review drawer.
+          if (reviewDetail?.lesson?.id === id) setReviewDetail(null);
+          if (monthlyReviewDetail?.entry?.id === id) setMonthlyReviewDetail(null);
           setNotice('Draft report deleted.');
           await refresh();
         });
@@ -935,7 +987,7 @@ export default function Home() {
           clubs: d.clubs ?? {},
         });
       })
-      .catch(() => {});
+      .catch((e) => { if (!cancelled) setError((e as Error).message); });
     return () => { cancelled = true; };
   }, [page, monthly, ref]);
 
@@ -1416,7 +1468,9 @@ export default function Home() {
           {/* ================= PAGE: OVERVIEW ================= */}
           {page === 'overview' && !overview && (
             <div className="panel">
-              <Empty title="Loading overview" detail="Fetching the latest school figures…" />
+              {loadError
+                ? <LoadErrorPanel message={loadError} onRetry={() => run(async () => { await refresh(); })} />
+                : <Empty title="Loading overview" detail="Fetching the latest school figures." />}
             </div>
           )}
           {page === 'overview' && overview && (
@@ -1903,7 +1957,7 @@ export default function Home() {
                     <h2>{user.role === 'ADMIN' ? 'All Reports' : 'My Report History'}</h2>
                     <p>Filter by cohort, subject area, approval status, and any date range</p>
                   </div>
-                  <button className="btn outline" onClick={() => refresh()}>
+                  <button className="btn outline" disabled={busy} onClick={() => run(async () => { await refresh(); setNotice('Data refreshed.'); })}>
                     <RefreshCw size={14} /> Refresh
                   </button>
                 </div>
@@ -2032,6 +2086,7 @@ export default function Home() {
                     <input
                       type="text"
                       placeholder="Search name, ID or class..."
+                      aria-label="Search students by name, ID or class"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
                       style={{ width: 180 }}
@@ -2039,6 +2094,7 @@ export default function Home() {
                   </label>
                   <select
                     value={selectedClass}
+                    aria-label="Filter students by class"
                     onChange={(e) => {
                       setSelectedClass(e.target.value);
                       setStudentPage(0);
@@ -2470,7 +2526,9 @@ export default function Home() {
           {/* ================= PAGE: ENTITY MANAGEMENT (ADMIN CRUD) ================= */}
           {page === 'manage' && user.role === 'ADMIN' && !ref && (
             <div className="panel">
-              <Empty title="Loading reference data" detail="Fetching years, classes and rosters…" />
+              {loadError
+                ? <LoadErrorPanel message={loadError} onRetry={() => run(async () => { await refresh(); })} />
+                : <Empty title="Loading reference data" detail="Fetching years, classes and rosters…" />}
             </div>
           )}
           {page === 'manage' && user.role === 'ADMIN' && ref && (
@@ -2549,16 +2607,19 @@ export default function Home() {
                 From class
                 <select value={promoteFrom} onChange={(e) => pickPromoteClass(e.target.value)}>
                   <option value="">Select a class</option>
-                  {(ref?.classes || []).filter((c: any) => c.active !== false).map((c: any) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
+                  {[...(ref?.classes || [])]
+                    .filter((c: any) => c.active !== false)
+                    .sort((a: any, b: any) => promoteYearLabel(a.academicYearId).localeCompare(promoteYearLabel(b.academicYearId)) || a.name.localeCompare(b.name))
+                    .map((c: any) => (
+                      <option key={c.id} value={c.id}>{c.name} · {promoteYearLabel(c.academicYearId)}</option>
+                    ))}
                 </select>
               </label>
               <label>
                 Academic year they join
                 <select value={promoteYear} onChange={(e) => pickPromoteYear(e.target.value)} disabled={!promoteFrom}>
                   <option value="">Select a year</option>
-                  {(ref?.years || []).filter((y: any) => y.active !== false).map((y: any) => (
+                  {promoteYearsSorted.map((y: any) => (
                     <option key={y.id} value={y.id}>{y.name}</option>
                   ))}
                 </select>
@@ -2573,10 +2634,24 @@ export default function Home() {
                 </select>
               </label>
             </div>
+            {promoteFrom && promoteYear && promoteFromClass && promoteYear === promoteFromClass.academicYearId && (
+              <p style={{ fontSize: 12, color: '#94640b', margin: '10px 0 0' }}>
+                That is the class&apos;s current year. Pick the next academic year (or create it and its classes first) to move learners up.
+              </p>
+            )}
+            {promoteFrom && promoteYear && promoteFromClass && promoteYear !== promoteFromClass.academicYearId && promoteDestOptions.length === 0 && (
+              <p style={{ fontSize: 12, color: '#94640b', margin: '10px 0 0' }}>
+                No class exists in that year yet. Create the destination class first.
+              </p>
+            )}
 
             {promoteFrom && (
               <div style={{ marginTop: 16 }}>
-                {promoteRoster.length === 0 ? (
+                {promoteRosterLoading ? (
+                  <div className="empty" style={{ padding: 20 }}>
+                    <div className="empty-title">Loading learners…</div>
+                  </div>
+                ) : promoteRoster.length === 0 ? (
                   <div className="empty" style={{ padding: 20 }}>
                     <div className="empty-title">No active learners in this class</div>
                   </div>
@@ -2842,12 +2917,10 @@ export default function Home() {
                               {importFields[importKind].map((k) => <td key={k}>{row[mapping[k]] || '—'}</td>)}
                           </tr>
                         ))}
-                        {visibleSummaries.length === 0 && (
+                        {importRows.length === 0 && (
                           <tr>
-                            <td colSpan={9} style={{ padding: 18, color: '#748792', textAlign: 'center' }}>
-                              {monthlySearch.trim()
-                                ? `No students match “${monthlySearch.trim()}”.`
-                                : 'No student records for this period yet.'}
+                            <td colSpan={importFields[importKind].length} style={{ padding: 18, color: '#748792', textAlign: 'center' }}>
+                              Choose a spreadsheet to preview its rows here.
                             </td>
                           </tr>
                         )}
@@ -3173,7 +3246,9 @@ export default function Home() {
           {/* ================= PAGE: SETTINGS (ADMIN) ================= */}
           {page === 'settings' && user.role === 'ADMIN' && !config && (
             <div className="panel">
-              <Empty title="Loading settings" detail="Fetching organization configuration…" />
+              {loadError
+                ? <LoadErrorPanel message={loadError} onRetry={() => run(async () => { setConfig(await api('settings')); setLoadError(null); })} />
+                : <Empty title="Loading settings" detail="Fetching organization configuration…" />}
             </div>
           )}
           {page === 'settings' && user.role === 'ADMIN' && config && (

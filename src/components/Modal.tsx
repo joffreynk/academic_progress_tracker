@@ -1,7 +1,15 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, AlertCircle, CheckCircle2, LockKeyhole } from 'lucide-react';
 import { PASSWORD_RULE_TEXT, isStrongPassword, passwordProblem } from '@/lib/password';
+
+// Every dialog needs a spoken name; variants without a title get a descriptive one.
+const dialogLabel = (c: ModalConfig) => {
+  if (c.type === 'reason' || c.type === 'reset_password' || c.type === 'confirm' || c.type === 'edit_entity') return c.title;
+  if (c.type === 'behaviour') return `Record observation for ${c.studentName}`;
+  if (c.type === 'date_correction') return 'Correct lesson date';
+  return 'Change password';
+};
 
 export type ModalConfig =
   | {
@@ -67,11 +75,33 @@ export default function Modal({
   config: ModalConfig | null;
   onClose: () => void;
 }) {
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+
+  // Keyboard users must be able to reach, close and return from every dialog.
+  useEffect(() => {
+    if (!config) return;
+    openerRef.current = document.activeElement as HTMLElement | null;
+    cardRef.current?.focus();
+    return () => {
+      openerRef.current?.focus?.();
+    };
+  }, [config]);
+
+  useEffect(() => {
+    if (!config) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [config, onClose]);
+
   if (!config) return null;
 
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true" onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={dialogLabel(config)} onClick={onClose}>
+      <div className="modal-card" ref={cardRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         {config.type === 'reason' && (
           <ReasonModal config={config} onClose={onClose} />
         )}

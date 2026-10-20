@@ -95,7 +95,8 @@ export default function PeriodPicker({
         </label>
       </div>
 
-      {invalid ? (
+      {/* An untouched optional period is not an error — only complain once the user has typed. */}
+      {trimmed && invalid ? (
         <p className="period-hint error">
           <TriangleAlert size={13} /> Choose a valid period of up to {MAX_PERIOD_MONTHS} months where the start is not after the end.
         </p>

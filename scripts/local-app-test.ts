@@ -466,6 +466,22 @@ async function main() {
   if (promoYearRow) tempRows.push({ kind: 'year', id: promoYearRow.id });
   const promoteWrongYear = await action('promoteStudents', { fromClassId: tempClass?.id, toClassId: destClassRow?.id, academicYearId: promoYearRow?.id, studentIds: [promoA?.id].filter(Boolean) as string[] });
   check('a destination class outside the chosen year is refused', promoteWrongYear.status >= 400 && /academic year/i.test(String(promoteWrongYear.body?.error || promoteWrongYear.body?.message || '')), { status: promoteWrongYear.status, body: promoteWrongYear.body, created: promoYear.status });
+
+  // Validation regressions: these used to surface as opaque 500s or silent truncation.
+  const dupeGrade = await action('create', undefined, { type: 'grade', data: { name: tempGrade?.name, orderIndex: 99 } });
+  check('a duplicate level name is refused with a conflict, not a server error', dupeGrade.status === 409, { status: dupeGrade.status, body: dupeGrade.body });
+  const dupeClass = await action('create', undefined, { type: 'class', data: { name: tempClass?.name, gradeId: tempGrade?.id, academicYearId: activeYear.id } });
+  check('a duplicate class name in the same year is refused with a conflict', dupeClass.status === 409, { status: dupeClass.status, body: dupeClass.body });
+  const badDates = await action('create', undefined, { type: 'year', data: { name: `TMPBAD-${suffix}`, startDate: '2026/08/01', endDate: '2027-07-31' } });
+  check('a malformed academic year date is refused', badDates.status === 400 && !/could not be completed/i.test(String(badDates.body?.error || '')), { status: badDates.status, body: badDates.body });
+  const invertedDates = await action('create', undefined, { type: 'year', data: { name: `TMPBAD2-${suffix}`, startDate: '2027-07-31', endDate: '2026-08-01' } });
+  check('a year that ends before it starts is refused', invertedDates.status === 400, { status: invertedDates.status, body: invertedDates.body });
+  const brokenJson = await call('/api/app', { method: 'POST', body: '{"action":' });
+  check('a malformed JSON body is a client error, not a server error', brokenJson.status === 400, { status: brokenJson.status, body: brokenJson.body });
+  const ghostEntry = await call('/api/app?view=monthlyEntry&entryId=00000000-0000-4000-8000-000000000000');
+  check('an unknown report link says not found instead of a month-format error', ghostEntry.status === 404, { status: ghostEntry.status, body: ghostEntry.body });
+  const badThresholds = await action('settings', undefined, { excellentThreshold: 1, goodThreshold: 3, homeworkUsuallyThreshold: 1, punctualityOccasionallyMax: 1, timezone: 'Africa/Bujumbura' });
+  check('an Excellent threshold below Good is refused', badThresholds.status >= 400, { status: badThresholds.status, body: badThresholds.body });
   const assignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   const duplicateAssignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   check('assignment creation succeeds and duplicates are rejected', assignment.status === 200 && duplicateAssignment.status >= 400, { assignment: assignment.body, duplicate: duplicateAssignment.body });

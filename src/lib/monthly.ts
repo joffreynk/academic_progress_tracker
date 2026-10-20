@@ -86,7 +86,7 @@ export const monthlyEntryInput = z.object({
   sessionsHeld: z.number().int().min(1).max(400).default(20),
   topics: z.string().max(500),
   submit: z.boolean(),
-  records: z.array(monthlyStudentInput).max(150),
+  records: z.array(monthlyStudentInput).max(200),
 });
 
 export type MonthlyStudentInput = z.infer<typeof monthlyStudentInput>;
