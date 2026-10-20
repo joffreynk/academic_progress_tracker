@@ -412,14 +412,24 @@ async function main() {
   const autoSecondRow = (afterSecond.body.students as any[]).find((s) => s.fullName === `Auto Seq2${suffix}`);
   if (autoSecondRow) tempRows.push({ kind: 'student', id: autoSecondRow.id });
   const firstCode = String(autoFirstRow?.studentId ?? '');
-  check('student ID is generated when none is entered', autoFirst.status === 200 && !!autoFirstRow && /\d+$/.test(firstCode) && !knownStudentIds.includes(firstCode), { auto: autoFirst.body, studentId: firstCode });
-  check('consecutive student IDs take the next number', autoSecond.status === 200 && Number.isFinite(tailOf(firstCode)) && tailOf(autoSecondRow?.studentId) === tailOf(firstCode) + 1, { first: firstCode, second: autoSecondRow?.studentId });
+  // Auto IDs keep counting in plain numbers: the next value is the highest stored number + 1,
+  // with no prefix and no zero padding.
+  const highestStoredNumber = (ids: unknown[]) => ids.reduce<number>((max, id) => {
+    const value = String(id ?? '').trim();
+    const n = /^\d+$/.test(value) ? Number(value) : 0;
+    return n > max ? n : max;
+  }, 0);
+  check('student ID is generated when none is entered', autoFirst.status === 200 && !!autoFirstRow && /^\d+$/.test(firstCode) && !knownStudentIds.includes(firstCode), { auto: autoFirst.body, studentId: firstCode });
+  check('student ID continues from the highest number stored', Number(firstCode) === highestStoredNumber(knownStudentIds) + 1, { generated: firstCode, highestStored: highestStoredNumber(knownStudentIds) });
+  check('consecutive student IDs take the next number', autoSecond.status === 200 && Number.isFinite(tailOf(firstCode)) && tailOf(autoSecondRow?.studentId) === tailOf(firstCode) + 1 && String(autoSecondRow?.studentId ?? '') === String(Number(firstCode) + 1), { first: firstCode, second: autoSecondRow?.studentId });
 
+  const knownTeacherIds = teachersList.map((t) => String(t.teacherId ?? ''));
   const autoTeacher = await action('create', undefined, { type: 'teacher', data: { name: `Auto Teacher ${suffix}`, email: `auto.${suffix}@school.test`, username: `tmpauto.${suffix}`, password: 'TempPass1!' } });
   const afterTeacher = await call('/api/app?view=reference');
   const autoTeacherRow = (afterTeacher.body.teachers as any[]).find((t) => t.name === `Auto Teacher ${suffix}`);
   if (autoTeacherRow) tempRows.push({ kind: 'teacher', id: autoTeacherRow.id });
-  check('teacher ID is generated when none is entered', autoTeacher.status === 200 && !!autoTeacherRow && /\d+$/.test(String(autoTeacherRow.teacherId || '')), { auto: autoTeacher.body, teacherId: autoTeacherRow?.teacherId });
+  check('teacher ID is generated when none is entered', autoTeacher.status === 200 && !!autoTeacherRow && /^\d+$/.test(String(autoTeacherRow.teacherId || '')), { auto: autoTeacher.body, teacherId: autoTeacherRow?.teacherId });
+  check('teacher ID continues from the highest number stored', Number(String(autoTeacherRow?.teacherId ?? '')) === highestStoredNumber(knownTeacherIds) + 1, { generated: autoTeacherRow?.teacherId, highestStored: highestStoredNumber(knownTeacherIds) });
   const assignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   const duplicateAssignment = await action('create', undefined, { type: 'assignment', data: { teacherId: teachersList[0].id, classId: tempClass?.id, subjectId: tempSubject?.id, academicYearId: activeYear.id } });
   check('assignment creation succeeds and duplicates are rejected', assignment.status === 200 && duplicateAssignment.status >= 400, { assignment: assignment.body, duplicate: duplicateAssignment.body });
