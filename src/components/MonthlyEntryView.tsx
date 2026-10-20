@@ -109,7 +109,11 @@ export default function MonthlyEntryView({
   const loadChecklist = (m: string) =>
     api('monthlyEntries', { month: m })
       .then((d: Checklist) => setChecklist(d))
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => {
+        // Keep nothing from a failed read: last month's checklist is worse than an empty one.
+        setChecklist(null);
+        setError(e.message);
+      });
 
   const applyForm = (d: FormPayload) => {
     const map: Record<string, Row> = {};
@@ -142,7 +146,13 @@ export default function MonthlyEntryView({
   const loadEntry = (m: string, cId: string, sId: string) =>
     api('monthlyEntry', { month: m, classId: cId, subjectId: sId })
       .then(applyForm)
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => {
+        // A failed load must not leave the previous class's numbers on screen: clear them so the
+        // empty state shows instead of someone else's roster.
+        setForm(null);
+        setRows({});
+        setError(e.message);
+      });
 
   // Load by explicit entry id (opened from report history), otherwise by month + class + subject.
   useEffect(() => {
@@ -163,7 +173,7 @@ export default function MonthlyEntryView({
           setSubjectId(d.subjectId);
           onTargetConsumed();
         })
-        .catch((e: Error) => { setError(e.message); onTargetConsumed(); })
+        .catch((e: Error) => { setForm(null); setRows({}); setError(e.message); onTargetConsumed(); })
         .finally(() => setLoading(false));
       return;
     }
@@ -400,13 +410,18 @@ export default function MonthlyEntryView({
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
             {checklistRows.map((item) => (
-              <div
+              <button
+                type="button"
                 key={`${item.classId}|${item.subjectId}`}
+                aria-pressed={item.classId === classId && item.subjectId === subjectId}
                 style={{
                   border: '1px solid #e8edf0',
                   borderRadius: 9,
                   padding: 12,
                   cursor: 'pointer',
+                  font: 'inherit',
+                  textAlign: 'left',
+                  width: '100%',
                   background: item.classId === classId && item.subjectId === subjectId ? '#f0fdfa' : '#fff',
                   transition: 'box-shadow .15s, border-color .15s',
                   display: 'flex',
@@ -429,7 +444,7 @@ export default function MonthlyEntryView({
                   <span>{item.kind === 'entry' ? item.studentCount ?? '—' : '—'} students</span>
                   <span>{item.kind === 'entry' ? 'Record exists' : 'Not started'}</span>
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         )}
@@ -476,7 +491,7 @@ export default function MonthlyEntryView({
                     {rosterEditor.selected.length === rosterEditor.students.length ? ' Saving this selection keeps the whole class.' : ' Only the selected students appear on this record.'}
                   </p>
                 </div>
-                <button className="icon-link" onClick={() => setRosterEditor(null)} title="Close"><X size={18} /></button>
+                <button className="icon-link" onClick={() => setRosterEditor(null)} title="Close" aria-label="Close roster editor"><X size={18} /></button>
               </div>
               <div className="search-box" style={{ marginBottom: 10 }}>
                 <Search size={15} />
@@ -533,7 +548,7 @@ export default function MonthlyEntryView({
               This record has been submitted and is read-only until it is returned or reopened by an administrator.
             </div>
           )}
-          {lateAbsentTotal > 0 && (
+          {editable && lateAbsentTotal > 0 && (
             <div className="notice-banner" style={{ background: '#fffbeb', color: '#92400e', marginBottom: 12 }}>
               Choose punctuality for {lateAbsentTotal} student{lateAbsentTotal === 1 ? '' : 's'} — every student needs a selection before submitting.
             </div>

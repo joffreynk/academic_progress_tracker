@@ -104,7 +104,7 @@ function ReasonModal({ config, onClose }: { config: Extract<ModalConfig, { type:
     <>
       <div className="modal-header">
         <h3>{config.title}</h3>
-        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+        <button className="icon-link" onClick={onClose} title="Close" aria-label="Close dialog"><X size={18} /></button>
       </div>
       <div className="modal-body">
         <label>
@@ -140,7 +140,7 @@ function DateCorrectionModal({ config, onClose }: { config: Extract<ModalConfig,
     <>
       <div className="modal-header">
         <h3>Correct Lesson Date</h3>
-        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+        <button className="icon-link" onClick={onClose} title="Close" aria-label="Close dialog"><X size={18} /></button>
       </div>
       <div className="modal-body">
         <p style={{ fontSize: 13, color: '#748792' }}>
@@ -192,7 +192,7 @@ function BehaviourModal({ config, onClose }: { config: Extract<ModalConfig, { ty
     <>
       <div className="modal-header">
         <h3>Record Behaviour Observation</h3>
-        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+        <button className="icon-link" onClick={onClose} title="Close" aria-label="Close dialog"><X size={18} /></button>
       </div>
       <div className="modal-body">
         <p style={{ fontSize: 13, color: '#748792', margin: '0 0 12px 0' }}>
@@ -286,7 +286,7 @@ function ResetPasswordModal({ config, onClose }: { config: Extract<ModalConfig, 
     <>
       <div className="modal-header">
         <h3>{config.title}</h3>
-        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+        <button className="icon-link" onClick={onClose} title="Close" aria-label="Close dialog"><X size={18} /></button>
       </div>
       <div className="modal-body">
         <p style={{ fontSize: 13, color: '#748792', margin: '0 0 12px 0' }}>
@@ -345,7 +345,7 @@ function ChangePasswordModal({ config, onClose }: { config: Extract<ModalConfig,
     <>
       <div className="modal-header">
         <h3>Change Password</h3>
-        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+        <button className="icon-link" onClick={onClose} title="Close" aria-label="Close dialog"><X size={18} /></button>
       </div>
       <div className="modal-body">
         <p style={{ fontSize: 13, color: '#748792', margin: '0 0 12px 0' }}>
@@ -398,7 +398,7 @@ function ConfirmModal({ config, onClose }: { config: Extract<ModalConfig, { type
     <>
       <div className="modal-header">
         <h3>{config.title}</h3>
-        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+        <button className="icon-link" onClick={onClose} title="Close" aria-label="Close dialog"><X size={18} /></button>
       </div>
       <div className="modal-body">
         <p style={{ fontSize: 14, color: '#31444d', margin: 0 }}>{config.message}</p>
@@ -425,7 +425,7 @@ function EditEntityModal({ config, onClose }: { config: Extract<ModalConfig, { t
     <>
       <div className="modal-header">
         <h3>{config.title}</h3>
-        <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+        <button className="icon-link" onClick={onClose} title="Close" aria-label="Close dialog"><X size={18} /></button>
       </div>
       <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {config.fields.map((f) => (

@@ -90,7 +90,7 @@ export default function StudentProfileModal({
               {student.status}
             </span>
           </div>
-          <button className="icon-link" onClick={onClose} title="Close"><X size={18} /></button>
+          <button className="icon-link" onClick={onClose} title="Close" aria-label="Close student profile"><X size={18} /></button>
         </div>
 
         {/* Tab Navigation */}

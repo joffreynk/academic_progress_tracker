@@ -32,13 +32,17 @@ export default function BehaviourView({
   const [filterFollowUp, setFilterFollowUp] = useState(false);
   const [observations, setObservations] = useState<Observation[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadData = () => {
     setLoading(true);
+    setLoadError(null);
     api('behaviourObservations', filterFollowUp ? { followUp: '1' } : {})
       .then((d) => setObservations(d.observations || []))
-      .catch((e) => console.error(e))
+      // Swallowing this into the console left a silent empty table, which reads as "no records"
+      // rather than "the request failed".
+      .catch((e) => setLoadError(e instanceof Error ? e.message : 'Could not load behaviour records.'))
       .finally(() => setLoading(false));
   };
 
@@ -92,7 +96,17 @@ export default function BehaviourView({
         </div>
       )}
 
-      {observations.length === 0 ? (
+      {loadError && (
+        <div className="notice-banner" style={{ background: '#fef2f2', color: '#991b1b', marginBottom: 16 }}>
+          {loadError}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="empty">
+          <div className="empty-title">Loading behaviour records…</div>
+        </div>
+      ) : observations.length === 0 ? (
         <div className="empty">
           <AlertTriangle size={32} color="#748792" />
           <div className="empty-title">No behaviour observations found</div>

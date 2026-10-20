@@ -278,9 +278,9 @@ const fieldMap: Record<string, { key: string; label: string; type?: string; opti
   ],
 };
 
-async function api(view: string, params: Record<string, string> = {}) {
+async function api(view: string, params: Record<string, string> = {}, init?: RequestInit) {
   const q = new URLSearchParams({ view, ...params });
-  const r = await fetch(`/api/app?${q.toString()}`);
+  const r = await fetch(`/api/app?${q.toString()}`, init);
   const data = await r.json();
   if (!r.ok) throw Error(data.error || 'Request failed.');
   return data;
@@ -423,6 +423,9 @@ export default function Home() {
   const [studentSort, setStudentSort] = useState<'name' | 'class'>('name');
   const [selectedSubject, setSelectedSubject] = useState('');
   const [reports, setReports] = useState<{ id: string; lessonDate: string; topic: string; status: string; className: string; subjectName: string; teacherName: string; reviewComment?: string | null; recordsCount?: number; rosterCount?: number; completionRate?: number; kind?: 'lesson' | 'monthly'; month?: string }[]>([]);
+  // The report history is fetched on its own, so bumping this counter is how a review, delete or
+  // filter change asks for a fresh copy instead of showing yesterday's status.
+  const [reportsNonce, setReportsNonce] = useState(0);
   
   // History filter state
   const [reportFilterClass, setReportFilterClass] = useState('');
@@ -437,6 +440,8 @@ export default function Home() {
   const [studentProfile, setStudentProfile] = useState<{ student: any; timeline: any[]; significant: any[] } | null>(null);
   const [page, setPage] = useState('overview');
   const [search, setSearch] = useState('');
+  // Typing a name should not fire a request per keystroke; the list waits for this to settle.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -508,6 +513,9 @@ export default function Home() {
       setRef(r);
       setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(today).from, to: today }));
     }
+    // Reviews, returns and deletes all land in the report history panel below, so every mutation
+    // goes through refresh() and must pull that list again too.
+    setReportsNonce((n) => n + 1);
   };
 
   useEffect(() => {
@@ -560,53 +568,73 @@ export default function Home() {
           setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(today).from, to: today }));
         }
       })
-      .catch(() => null);
+      // Without the reference data every picker is empty, so a silent catch here would leave the
+      // whole app looking broken for no visible reason.
+      .catch((e) => setError(e.message));
   }, [user, overview?.today]);
+
+  // Search-as-you-type: hold the request until typing settles, and restart pagination whenever
+  // the term changes so page 2 of the old query is not shown for the new one.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setStudentPage(0);
+      setDebouncedSearch(search);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [search]);
 
   useEffect(() => {
     if (!user) return;
-    if (page === 'reports') {
-      api('reports', {
-        ...(reportFilterClass ? { classId: reportFilterClass } : {}),
-        ...(reportFilterSubject ? { subjectId: reportFilterSubject } : {}),
-        ...(reportFilterStatus ? { status: reportFilterStatus } : {}),
-        ...(reportFilterPeriod.from ? { from: reportFilterPeriod.from } : {}),
-        ...(reportFilterPeriod.to ? { to: reportFilterPeriod.to } : {}),
-      })
-        .then((d) => setReports(d.reports))
-        .catch((e) => setError(e.message));
-    }
-    // Teachers may only read one assigned class, so a missing selection means nothing to
-    // fetch; the class selector clears the roster below instead of leaving stale rows.
-    if (page === 'students' && (user.role === 'ADMIN' || selectedClass)) {
-      api('students', {
-        ...(selectedClass ? { classId: selectedClass } : {}),
-        ...(search ? { search } : {}),
-        sort: studentSort,
-        page: String(studentPage),
-      })
-        .then((d) => {
-          setStudents(d.students);
-          setStudentsHasMore(d.hasMore);
-        })
-        .catch((e) => setError(e.message));
-    }
-    if (page === 'organizations') {
-      api('organizations')
-        .then((d) => setOrganizations(d.organizations))
-        .catch((e) => setError(e.message));
-    }
-    if (page === 'audit') {
-      api('audit')
-        .then((d) => setAuditLogs(d.logs))
-        .catch((e) => setError(e.message));
-    }
-    if (page === 'settings' && user.role === 'ADMIN') {
-      api('settings')
-        .then(setConfig)
-        .catch((e) => setError(e.message));
-    }
-  }, [page, user, selectedClass, search, studentPage, studentSort, reportFilterClass, reportFilterSubject, reportFilterStatus, reportFilterPeriod.from, reportFilterPeriod.to]);
+    // A slower earlier response must never overwrite a newer one, so the previous request is
+    // cancelled as soon as the filters change.
+    const ctrl = new AbortController();
+    const load = async () => {
+      try {
+        if (page === 'reports') {
+          const d = await api('reports', {
+            ...(reportFilterClass ? { classId: reportFilterClass } : {}),
+            ...(reportFilterSubject ? { subjectId: reportFilterSubject } : {}),
+            ...(reportFilterStatus ? { status: reportFilterStatus } : {}),
+            ...(reportFilterPeriod.from ? { from: reportFilterPeriod.from } : {}),
+            ...(reportFilterPeriod.to ? { to: reportFilterPeriod.to } : {}),
+          }, { signal: ctrl.signal });
+          setReports(d.reports);
+        }
+        if (page === 'students') {
+          if (user.role === 'ADMIN' || selectedClass) {
+            const d = await api('students', {
+              ...(selectedClass ? { classId: selectedClass } : {}),
+              ...(debouncedSearch ? { search: debouncedSearch } : {}),
+              sort: studentSort,
+              page: String(studentPage),
+            }, { signal: ctrl.signal });
+            setStudents(d.students);
+            setStudentsHasMore(d.hasMore);
+          } else {
+            // Teachers may only read one assigned class: a missing selection means nothing to
+            // fetch, so clear the roster instead of leaving another teacher's rows on screen.
+            setStudents([]);
+            setStudentsHasMore(false);
+          }
+        }
+        if (page === 'organizations') {
+          setOrganizations(await api('organizations', {}, { signal: ctrl.signal }).then((d) => d.organizations));
+        }
+        if (page === 'audit') {
+          setAuditLogs(await api('audit', {}, { signal: ctrl.signal }).then((d) => d.logs));
+        }
+        if (page === 'settings' && user.role === 'ADMIN') {
+          setConfig(await api('settings', {}, { signal: ctrl.signal }));
+        }
+      } catch (e) {
+        // An aborted call is the effect being cleaned up, not something worth telling the user.
+        if ((e as Error)?.name === 'AbortError') return;
+        setError((e as Error).message);
+      }
+    };
+    load();
+    return () => ctrl.abort();
+  }, [page, user, selectedClass, debouncedSearch, studentPage, studentSort, reportFilterClass, reportFilterSubject, reportFilterStatus, reportFilterPeriod.from, reportFilterPeriod.to, reportsNonce]);
 
 
   const doLogin = (e: React.FormEvent) => {
@@ -856,6 +884,20 @@ export default function Home() {
     }
   };
 
+  // A clickable <th> alone is invisible to a keyboard, so the sort control is a real button and
+  // aria-sort tells a screen reader which column is driving the order.
+  const sortableTh = (col: string, label: string) => (
+    <th scope="col" aria-sort={monthlySortCol === col ? (monthlySortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button
+        type="button"
+        onClick={() => toggleMonthlySort(col)}
+        style={{ background: 'none', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+      >
+        {label} <ArrowUpDown size={12} />
+      </button>
+    </th>
+  );
+
   // Download Class Monthly Excel (§57, §105)
   const exportClassMonthlyExcel = async (fullClass = true) => {
     if (!monthly) return;
@@ -910,29 +952,26 @@ export default function Home() {
 
   const exportMonthlyCsv = () => {
     if (!monthly) return;
-    const headers = ['Student ID', 'Student Name', 'Class', 'Subject', 'Teacher', 'Lessons', 'Punctuality', 'Performance', 'Participation', 'Homework', 'Conduct'];
-    const rows = sortedSummaries.map((s) => [
-      `"${s.studentCode}"`,
-      `"${s.studentName}"`,
-      `"${s.className}"`,
-      `"${s.subjectName}"`,
-      `"${s.teacherName || ''}"`,
-      s.lessons,
-      `"${s.punctualityResult}"`,
-      `"${pretty(s.performanceResult)}"`,
-      `"${s.participationResult}"`,
-      `"${s.homeworkResult}"`,
-      `"${pretty(s.conductResult)}"`,
-    ]);
-    const text = [headers.join(','), ...rows.map((r) => r.join(','))].join('\r\n');
-    const blob = new Blob([text], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    // toCsv doubles embedded quotes and guards formula injection; hand-rolled quoting here
+    // silently corrupted any topic or name that contained a comma or a quote.
+    const text = toCsv(
+      ['Student ID', 'Student Name', 'Class', 'Subject', 'Teacher', 'Lessons', 'Punctuality', 'Performance', 'Participation', 'Homework', 'Conduct'],
+      sortedSummaries.map((s) => ({
+        'Student ID': String(s.studentCode),
+        'Student Name': String(s.studentName),
+        Class: String(s.className),
+        Subject: String(s.subjectName),
+        Teacher: String(s.teacherName || ''),
+        Lessons: String(s.lessons),
+        Punctuality: String(s.punctualityResult),
+        Performance: String(pretty(s.performanceResult)),
+        Participation: String(s.participationResult),
+        Homework: String(s.homeworkResult),
+        Conduct: String(pretty(s.conductResult)),
+      }))
+    );
     const fileName = `${monthly.organization.replace(/\s+/g, '_')}-${periodSlug(monthly.period)}-monthly.csv`;
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadTextFile(fileName, text);
     setNotice(`CSV export downloaded: ${fileName}`);
   };
 
@@ -1265,7 +1304,7 @@ export default function Home() {
       {/* MAIN CONTENT AREA */}
       <main className="main-content">
         <header className="topbar">
-          <button className="menu-btn" onClick={() => setMobile(!mobile)}>
+          <button className="menu-btn" onClick={() => setMobile(!mobile)} aria-label={mobile ? 'Close menu' : 'Open menu'} aria-expanded={mobile}>
             {mobile ? <X size={20} /> : <Menu size={20} />}
           </button>
           <div className="topbar-title">
@@ -1349,7 +1388,7 @@ export default function Home() {
                     </div>
                     <div className="stat-card">
                       <div className="stat-label">Approval Rate</div>
-                      <div className="stat-value" style={{ color: '#22a57d' }}>{overview.approvalRate ?? 100}%</div>
+                      <div className="stat-value" style={{ color: overview.approvalRate === undefined ? '#748792' : '#22a57d' }}>{overview.approvalRate === undefined ? '—' : `${overview.approvalRate}%`}</div>
                       <small style={{ color: '#748792' }}>Administrative queue</small>
                     </div>
                     <div className="stat-card">
@@ -1579,7 +1618,7 @@ export default function Home() {
                         </div>
                       )}
                     </div>
-                    <button className="icon-link" onClick={() => setReviewDetail(null)}>
+                    <button className="icon-link" onClick={() => setReviewDetail(null)} aria-label="Close report">
                       <X size={20} />
                     </button>
                   </div>
@@ -1647,6 +1686,7 @@ export default function Home() {
                       {reviewDetail.lesson.status === 'SUBMITTED' && (
                         <button
                           className="btn outline"
+                          disabled={busy}
                           onClick={() => transitionReview(reviewDetail.lesson.id, 'UNDER_REVIEW')}
                         >
                           Mark Under Review
@@ -1657,12 +1697,14 @@ export default function Home() {
                           <button
                             className="btn outline"
                             style={{ color: '#c67a53', borderColor: '#c67a53' }}
+                            disabled={busy}
                             onClick={() => transitionReview(reviewDetail.lesson.id, 'RETURNED')}
                           >
                             Return for Revision
                           </button>
                           <button
                             className="btn primary"
+                            disabled={busy}
                             onClick={() => transitionReview(reviewDetail.lesson.id, 'APPROVED')}
                           >
                             <CheckCircle2 size={16} /> Approve Report
@@ -1672,6 +1714,7 @@ export default function Home() {
                       {reviewDetail.lesson.status === 'APPROVED' && (
                         <button
                           className="btn outline"
+                          disabled={busy}
                           onClick={() => transitionReview(reviewDetail.lesson.id, 'SUBMITTED')}
                         >
                           Reopen Approved Report
@@ -1705,7 +1748,7 @@ export default function Home() {
                         </div>
                       )}
                     </div>
-                    <button className="icon-link" onClick={() => setMonthlyReviewDetail(null)}>
+                    <button className="icon-link" onClick={() => setMonthlyReviewDetail(null)} aria-label="Close record">
                       <X size={20} />
                     </button>
                   </div>
@@ -1754,7 +1797,7 @@ export default function Home() {
 
                   <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
                     {monthlyReviewDetail.entry.status === 'SUBMITTED' && (
-                      <button className="btn outline" onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'UNDER_REVIEW')}>
+                      <button className="btn outline" disabled={busy} onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'UNDER_REVIEW')}>
                         Mark Under Review
                       </button>
                     )}
@@ -1763,17 +1806,18 @@ export default function Home() {
                         <button
                           className="btn outline"
                           style={{ color: '#c67a53', borderColor: '#c67a53' }}
+                          disabled={busy}
                           onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'RETURNED')}
                         >
                           Return for Revision
                         </button>
-                        <button className="btn primary" onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'APPROVED')}>
+                        <button className="btn primary" disabled={busy} onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'APPROVED')}>
                           <CheckCircle2 size={16} /> Approve Record
                         </button>
                       </>
                     )}
                     {monthlyReviewDetail.entry.status === 'APPROVED' && (
-                      <button className="btn outline" onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'SUBMITTED')}>
+                      <button className="btn outline" disabled={busy} onClick={() => transitionReview(monthlyReviewDetail.entry.id, 'SUBMITTED')}>
                         Reopen Approved Record
                       </button>
                     )}
@@ -1885,9 +1929,10 @@ export default function Home() {
                                   <button
                                     className="btn outline"
                                     style={{ padding: '4px 8px', fontSize: 12, color: '#c67a53' }}
-                                    onClick={() => initiateDeleteDraft(r.id, r.kind === 'monthly' ? 'monthly' : 'lesson')}
-                                  >
-                                    <Trash2 size={13} />
+                    onClick={() => initiateDeleteDraft(r.id, r.kind === 'monthly' ? 'monthly' : 'lesson')}
+                    aria-label="Delete draft"
+                  >
+                    <Trash2 size={13} />
                                   </button>
                                 )}
                               </div>
@@ -1917,7 +1962,7 @@ export default function Home() {
                       type="text"
                       placeholder="Search name, ID or class..."
                       value={search}
-                      onChange={(e) => { setSearch(e.target.value); setStudentPage(0); }}
+                      onChange={(e) => setSearch(e.target.value)}
                       style={{ width: 180 }}
                     />
                   </label>
@@ -1951,7 +1996,16 @@ export default function Home() {
               </div>
 
               {students.length === 0 ? (
-                <Empty title="No students found" detail="No active students found in this roster." />
+                <Empty
+                  title={user.role === 'TEACHER' && !selectedClass ? 'Choose a class' : 'No students found'}
+                  detail={
+                    user.role === 'TEACHER' && !selectedClass
+                      ? 'Pick one of your assigned classes above to see its roster.'
+                      : debouncedSearch.trim()
+                      ? `No students match “${debouncedSearch.trim()}”.`
+                      : 'No active students found in this roster.'
+                  }
+                />
               ) : (
                 <div className="table-scroll">
                   <table>
@@ -2199,25 +2253,15 @@ export default function Home() {
                     <table>
                       <thead>
                         <tr>
-                          <th style={{ cursor: 'pointer' }} onClick={() => toggleMonthlySort('studentName')}>
-                            Student <ArrowUpDown size={12} />
-                          </th>
-                          <th style={{ cursor: 'pointer' }} onClick={() => toggleMonthlySort('className')}>
-                            Class <ArrowUpDown size={12} />
-                          </th>
-                          <th style={{ cursor: 'pointer' }} onClick={() => toggleMonthlySort('subjectName')}>
-                            Subject <ArrowUpDown size={12} />
-                          </th>
-                          <th>Lessons</th>
-                          <th style={{ cursor: 'pointer' }} onClick={() => toggleMonthlySort('punctualityResult')}>
-                            Punctuality <ArrowUpDown size={12} />
-                          </th>
-                          <th style={{ cursor: 'pointer' }} onClick={() => toggleMonthlySort('performanceResult')}>
-                            Performance <ArrowUpDown size={12} />
-                          </th>
-                          <th>Participation</th>
-                          <th>Homework</th>
-                          <th>Conduct</th>
+                          {sortableTh('studentName', 'Student')}
+                          {sortableTh('className', 'Class')}
+                          {sortableTh('subjectName', 'Subject')}
+                          <th scope="col">Lessons</th>
+                          {sortableTh('punctualityResult', 'Punctuality')}
+                          {sortableTh('performanceResult', 'Performance')}
+                          <th scope="col">Participation</th>
+                          <th scope="col">Homework</th>
+                          <th scope="col">Conduct</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2505,8 +2549,9 @@ export default function Home() {
                                   className="btn outline"
                                   style={{ padding: '4px 8px', fontSize: 12, color: '#c67a53' }}
                                   onClick={() => initiateDeleteEntity(entity, item.id, a ? `${a.teacher} · ${a.subject} · ${a.cls}` : item.name || item.email || item.fullName || entityLabel(entity))}
-                                  title={`Deactivate ${entityLabel(entity)}`}
-                                >
+                  title={`Deactivate ${entityLabel(entity)}`}
+                  aria-label={`Deactivate ${entityLabel(entity)}`}
+                >
                                   <Trash2 size={13} />
                                 </button>
                               )}
@@ -2623,9 +2668,18 @@ export default function Home() {
                           {importRows.slice(0, 5).map((row, index) => (
                             <tr key={index}>
                               {importFields[importKind].map((k) => <td key={k}>{row[mapping[k]] || '—'}</td>)}
-                            </tr>
-                          ))}
-                        </tbody>
+                          </tr>
+                        ))}
+                        {visibleSummaries.length === 0 && (
+                          <tr>
+                            <td colSpan={9} style={{ padding: 18, color: '#748792', textAlign: 'center' }}>
+                              {monthlySearch.trim()
+                                ? `No students match “${monthlySearch.trim()}”.`
+                                : 'No student records for this period yet.'}
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
                       </table>
                     </div>
                   </div>
@@ -2809,7 +2863,7 @@ export default function Home() {
                   </label>
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-                  <button className="btn primary" onClick={() => run(async () => {
+                  <button className="btn primary" disabled={busy} onClick={() => run(async () => {
                     const payload = { ...orgForm, id: orgForm.id || undefined };
                     await post('organization', payload);
                     setNotice(orgForm.id ? 'Organization updated successfully.' : 'Organization created successfully.');
@@ -3058,6 +3112,7 @@ export default function Home() {
                   <button
                     className="btn primary"
                     style={{ marginTop: 8 }}
+                    disabled={busy}
                     onClick={() => {
                       run(async () => {
                         await post('settings', {
@@ -3096,7 +3151,7 @@ export default function Home() {
                   </label>
                   <button
                     className="btn primary"
-                    disabled={!accountUsername || accountUsername.trim() === (user.username || '')}
+                    disabled={busy || !accountUsername || accountUsername.trim() === (user.username || '')}
                     onClick={() => {
                       if (!accountUsername) return;
                       const wanted = accountUsername.trim();
@@ -3128,6 +3183,7 @@ export default function Home() {
                   />
                   <button
                     className="btn primary"
+                    disabled={busy}
                     onClick={() => {
                       const input = document.getElementById('newClosureMonth') as HTMLInputElement;
                       if (!input?.value) return;

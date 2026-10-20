@@ -385,7 +385,7 @@ export default function ClubsView({
               <h2>{clubForm.id ? 'Edit Club' : 'New Club'}</h2>
               <p>{clubForm.id ? 'Update the club details, teachers in charge and member roster.' : 'Create a club and assign the teacher-in-charge plus the student members.'}</p>
             </div>
-            <button className="icon-link" onClick={() => setClubForm(null)} title="Close"><X size={18} /></button>
+            <button className="icon-link" onClick={() => setClubForm(null)} title="Close" aria-label="Close club form"><X size={18} /></button>
           </div>
           <div className="form-grid">
             <label>
@@ -475,7 +475,7 @@ export default function ClubsView({
               <h2>{activityForm.id ? 'Edit Activity' : 'Record Activity'}</h2>
               <p>One observation row per member: punctuality, performance, participation, conduct and a comment. Saved as a draft until submitted.</p>
             </div>
-            <button className="icon-link" onClick={() => setActivityForm(null)} title="Close"><X size={18} /></button>
+            <button className="icon-link" onClick={() => setActivityForm(null)} title="Close" aria-label="Close activity form"><X size={18} /></button>
           </div>
           <div className="form-grid">
             <label>
@@ -625,7 +625,7 @@ export default function ClubsView({
                 {isAdmin && (
                   <>
                     <button className="icon-link" title="Edit club" onClick={() => openEditClub(club)}><Edit3 size={15} /></button>
-                    {club.active && <button className="icon-link" title="Archive club" onClick={() => archiveClub(club)}><Trash2 size={15} /></button>}
+                    {club.active && <button className="icon-link" title="Archive club" aria-label={`Archive ${club.name}`} onClick={() => archiveClub(club)}><Trash2 size={15} /></button>}
                   </>
                 )}
               </div>
