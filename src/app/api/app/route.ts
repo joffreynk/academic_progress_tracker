@@ -784,14 +784,14 @@ export async function POST(req:Request){try{
   // Logged with the offending action and role so production 403s can be traced to a screen.
   if(user.role!=='ADMIN'){console.error(`[api] blocked action=${action} role=${user.role} user=${user.id}`);throw new AppError('Administrator access required.',403);}
  const org=await orgFor(user);const oid=org.id;
-  /** Next person ID for an organization: the highest number already stored + 1, as a plain
-   *  number, so the list keeps counting 1, 2, 3 … rather than inventing a prefix or padding. */
+  /** Next person ID for an organization: the highest number found in the codes already stored + 1,
+   *  as a plain number. A last ID of 30 (or 2026-2027-10-30) is followed by 31. */
   const nextPersonCode = (existing: (string | null)[]) => {
     let max = 0;
     for (const raw of existing) {
-      const value = String(raw ?? '').trim();
-      if (!/^\d+$/.test(value)) continue;
-      const n = Number(value);
+      const digits = /(\d+)$/.exec(String(raw ?? '').trim());
+      if (!digits) continue;
+      const n = Number(digits[1]);
       if (n > max) max = n;
     }
     return String(max + 1);

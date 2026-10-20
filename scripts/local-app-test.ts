@@ -412,11 +412,11 @@ async function main() {
   const autoSecondRow = (afterSecond.body.students as any[]).find((s) => s.fullName === `Auto Seq2${suffix}`);
   if (autoSecondRow) tempRows.push({ kind: 'student', id: autoSecondRow.id });
   const firstCode = String(autoFirstRow?.studentId ?? '');
-  // Auto IDs keep counting in plain numbers: the next value is the highest stored number + 1,
-  // with no prefix and no zero padding.
+  // Auto IDs keep counting in plain numbers: the next value is the highest number found in the
+  // codes already stored + 1, with no prefix and no zero padding (a last ID of 30 is followed by 31).
   const highestStoredNumber = (ids: unknown[]) => ids.reduce<number>((max, id) => {
-    const value = String(id ?? '').trim();
-    const n = /^\d+$/.test(value) ? Number(value) : 0;
+    const digits = /(\d+)$/.exec(String(id ?? '').trim());
+    const n = digits ? Number(digits[1]) : 0;
     return n > max ? n : max;
   }, 0);
   check('student ID is generated when none is entered', autoFirst.status === 200 && !!autoFirstRow && /^\d+$/.test(firstCode) && !knownStudentIds.includes(firstCode), { auto: autoFirst.body, studentId: firstCode });
