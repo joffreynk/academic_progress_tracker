@@ -3,7 +3,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Plus, RefreshCw, CheckCircle2, Edit3, Trash2, X, Search, Users, Clock3, FileArchive, Wand2, ClipboardList } from 'lucide-react';
 import type { ModalConfig } from '@/components/Modal';
 import { downloadClubReportsZip, type ClubAcademicProfile } from '@/lib/reportPdf';
-import { punctualityLabels, punctualityLevels, performanceLevels, participationLevels, conductLevels } from '@/lib/monthly';
+import { punctualityLabels, punctualityOptionsFor, performanceLevels, participationLevels, conductLevels } from '@/lib/monthly';
 import { monthLabel } from '@/lib/period';
 
 /** Club activities are recorded per month; rows saved before that still carry a full date. */
@@ -26,15 +26,18 @@ type Payload = {
   members: MemberRow[];
   activities: ActivityRow[];
   records: ActivityRecordRow[];
+  /** Set when the server had to cap `records`; `recordsTotal` is how many rows really exist. */
+  recordsTruncated?: boolean;
+  recordsTotal?: number;
   teacherOptions: { id: string; name: string; active: boolean }[];
   studentOptions?: { id: string; studentId: string; fullName: string; classId: string; className: string | null }[];
+  /** Every club holding a student this teacher can pick, including clubs they are not assigned to. */
+  otherMemberships?: { studentId: string; clubId: string; clubName: string }[];
 };
 
 type ClubForm = { id?: string; name: string; description: string; academicYearId: string; active: boolean; teacherIds: string[]; studentIds: string[] };
 type MemberRecord = { punctuality: string | null; performance: string | null; participation: string | null; conduct: string | null; comment: string };
 type ActivityForm = { id?: string; clubId: string; title: string; activityDate: string; description: string; records: Record<string, MemberRecord> };
-
-const PUNCTUALITY_OPTIONS = punctualityLevels.map((k) => [k, punctualityLabels[k]] as const);
 
 const LEVEL_OPTIONS: Record<'performance' | 'participation' | 'conduct', readonly string[]> = {
   performance: performanceLevels,
@@ -87,7 +90,15 @@ export default function ClubsView({
   const loadData = () => {
     setLoading(true);
     return api('clubs')
-      .then((d: Payload) => { setData(d); setError(null); })
+      .then((d: Payload) => {
+        setData(d);
+        setError(null);
+        // The screen still works with a capped record list, so say what is missing instead of
+        // leaving the admin to trust an incomplete table.
+        setNotice(d.recordsTruncated
+          ? `Showing the first ${d.records.length} of ${d.recordsTotal ?? d.records.length} club activity records. Older records are not listed here.`
+          : null);
+      })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
   };
@@ -288,7 +299,9 @@ export default function ClubsView({
     setError(null);
     setNotice(`Building one club report for each of ${members.length} members.`);
     // The academic profile is a nice-to-have: without it the report keeps its club-record cards.
+    // It is not silent, though — a ZIP without them must say so.
     let profiles: Record<string, ClubAcademicProfile> | undefined;
+    let profileWarning = '';
     try {
       const scope = await api('clubProfiles', { studentIds: members.map((m) => m.studentId).join(',') });
       const label = scope?.profile?.label || 'All recorded data';
@@ -296,8 +309,9 @@ export default function ClubsView({
       for (const [studentId, tally] of Object.entries<Record<string, unknown>>(scope?.tallies || {})) {
         profiles[studentId] = { label, ...(tally as Omit<ClubAcademicProfile, 'label'>) };
       }
-    } catch {
+    } catch (e) {
       profiles = undefined;
+      profileWarning = ` Academic profiles were skipped: ${e instanceof Error ? e.message : 'the server could not build them.'}`;
     }
     downloadClubReportsZip({
       school, club: { name: club.name, description: club.description || '' },
@@ -308,7 +322,7 @@ export default function ClubsView({
       logoUrl: logoUrl || '/icons/school_logo.png',
       onProgress: (done, total) => setNotice(`Building club PDFs. ${done} of ${total}`),
     })
-      .then((result) => setNotice(`Club reports ZIP downloaded: ${result.filename} (${result.count} student PDFs).`))
+      .then((result) => setNotice(`Club reports ZIP downloaded: ${result.filename} (${result.count} student PDFs).${profileWarning}`))
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Could not build the club reports.'))
       .finally(() => setBuilding(false));
   };
@@ -355,6 +369,36 @@ export default function ClubsView({
   }, [students, studentSearch]);
 
   const toggle = (list: string[], id: string) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
+
+  const clubNameOf = (clubId: string) => data?.clubs.find((c) => c.id === clubId)?.name || 'another club';
+
+  /** A child belongs to only one club: the first other club holding this student, if any.
+      `otherMemberships` spans the whole school, so a teacher still gets the warning for a club
+      they cannot see; `members` alone only covers their own clubs. */
+  const otherClubOf = (studentId: string, exceptClubId?: string | null): { clubId: string; clubName: string } | null => {
+    const wider = data?.otherMemberships?.find((m) => m.studentId === studentId && m.clubId !== exceptClubId);
+    if (wider) return { clubId: wider.clubId, clubName: wider.clubName };
+    const own = data?.members.find((m) => m.studentId === studentId && m.clubId !== exceptClubId);
+    return own ? { clubId: own.clubId, clubName: clubNameOf(own.clubId) } : null;
+  };
+
+  /** Checking a student who already belongs elsewhere asks for confirmation before moving them. */
+  const toggleStudentOnce = (list: string[], studentId: string, studentName: string, exceptClubId: string | null | undefined, apply: (next: string[]) => void) => {
+    if (list.includes(studentId)) { apply(list.filter((x) => x !== studentId)); return; }
+    const other = otherClubOf(studentId, exceptClubId);
+    if (other) {
+      const previous = other.clubName;
+      setModalConfig({
+        type: 'confirm',
+        title: 'Move to Another Club',
+        message: `${studentName} already belongs to "${previous}". Each child can belong to only one club — saving will remove them from "${previous}" and keep them only in this club.`,
+        confirmLabel: 'Move Club',
+        onConfirm: () => apply([...list, studentId]),
+      });
+      return;
+    }
+    apply([...list, studentId]);
+  };
 
   return (
     <div>
@@ -442,17 +486,20 @@ export default function ClubsView({
           </div>
           <div style={{ maxHeight: 260, overflowY: 'auto', border: '1px solid #ebeff1', borderRadius: 9, padding: 10 }}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 6 }}>
-              {filteredStudents.map((s) => (
+              {filteredStudents.map((s) => {
+                const elsewhere = otherClubOf(s.id, clubForm.id);
+                return (
                 <label key={s.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, fontSize: 12, padding: '4px 6px' }}>
                   <input
                     type="checkbox"
                     style={{ width: 16, height: 16 }}
                     checked={clubForm.studentIds.includes(s.id)}
-                    onChange={() => setClubForm({ ...clubForm, studentIds: toggle(clubForm.studentIds, s.id) })}
+                    onChange={() => toggleStudentOnce(clubForm.studentIds, s.id, s.fullName, clubForm.id, (next) => setClubForm({ ...clubForm, studentIds: next }))}
                   />
-                  <span>{s.fullName} <span className="muted">· {classNameOf(s.classId)} · {s.studentId}</span></span>
+                  <span>{s.fullName} <span className="muted">· {classNameOf(s.classId)} · {s.studentId}{elsewhere ? ` · in ${elsewhere.clubName}` : ''}</span></span>
                 </label>
-              ))}
+                );
+              })}
               {!filteredStudents.length && <p className="muted" style={{ fontSize: 12 }}>No students match that search.</p>}
             </div>
           </div>
@@ -535,7 +582,7 @@ export default function ClubsView({
                           onChange={(e) => setCell(m.studentId, { punctuality: e.target.value || null })}
                         >
                           <option value="">— Choose —</option>
-                          {PUNCTUALITY_OPTIONS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                          {punctualityOptionsFor(row.punctuality).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
                         </select>
                       </td>
                       <td>
@@ -668,17 +715,20 @@ export default function ClubsView({
                           <input value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)} placeholder="Search name or student ID" aria-label="Search club members by name or ID" />
                         </div>
                         <div style={{ maxHeight: 220, overflowY: 'auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 6 }}>
-                          {filteredMemberOptions.map((s) => (
+                          {filteredMemberOptions.map((s) => {
+                            const elsewhere = otherClubOf(s.id, memberClub);
+                            return (
                             <label key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, padding: '4px 6px' }}>
                               <input
                                 type="checkbox"
                                 style={{ width: 16, height: 16 }}
                                 checked={memberDraft.includes(s.id)}
-                                onChange={() => setMemberDraft(toggle(memberDraft, s.id))}
+                                onChange={() => toggleStudentOnce(memberDraft, s.id, s.fullName, memberClub, setMemberDraft)}
                               />
-                              <span>{s.fullName} <span className="muted">{s.className ? `${s.className} ` : ''}{s.studentId}</span></span>
+                              <span>{s.fullName} <span className="muted">{s.className ? `${s.className} ` : ''}{s.studentId}{elsewhere ? ` · in ${elsewhere.clubName}` : ''}</span></span>
                             </label>
-                          ))}
+                            );
+                          })}
                           {!filteredMemberOptions.length && <p className="muted" style={{ fontSize: 12 }}>No students match that search.</p>}
                         </div>
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 10 }}>
@@ -789,7 +839,7 @@ export default function ClubsView({
                                                     <strong>{r.studentName}</strong>
                                                     <div style={{ fontSize: 11, color: '#748792' }}>{r.studentCode}</div>
                                                   </td>
-                                                  <td>{r.punctuality ? r.punctuality.replaceAll('_', ' ') : '—'}</td>
+                                                  <td>{r.punctuality ? (punctualityLabels[r.punctuality as keyof typeof punctualityLabels] ?? r.punctuality.replaceAll('_', ' ')) : '—'}</td>
                                                   <td>{r.performance ? r.performance.replaceAll('_', ' ') : '—'}</td>
                                                   <td>{r.participation ? r.participation.replaceAll('_', ' ') : '—'}</td>
                                                   <td>{r.conduct ? r.conduct.replaceAll('_', ' ') : '—'}</td>

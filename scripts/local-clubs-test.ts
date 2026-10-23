@@ -251,7 +251,7 @@ async function main() {
   const firstText = firstEntry && pdfText(Buffer.from(await unzipped.files[firstEntry].async('nodebuffer')));
   const firstMember = (view.body.members as any[]).filter((m) => m.clubId === clubId)[0];
   check('club report lists the club activity', !!firstText && firstText.includes('First build session'), firstText?.slice(0, 200));
-  check('club report shows member observations', !!firstText && firstText.includes('Always On Time') && firstText.includes('Good'), !!firstText);
+  check('club report shows member observations', !!firstText && firstText.includes('On Time') && firstText.includes('Good'), !!firstText);
   check('club report omits the student ID', !!firstText && !firstText.includes(firstMember.studentCode), firstMember.studentCode);
   check('club report omits the student code column header', !/STUDENT (ID|CODE)/i.test(firstText || ''), firstText?.slice(0, 200));
   check('club report grades the academic profile in percentages', !!firstText && /PERFORMANCE/.test(firstText) && /PUNCTUALITY/.test(firstText) && /HOMEWORK/.test(firstText) && /\d+%/.test(firstText), firstText?.slice(0, 400));

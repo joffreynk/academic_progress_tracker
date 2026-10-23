@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Download, BarChart3, TrendingUp, Users, CheckCircle } from 'lucide-react';
 import { buildReportActivitySeries, type Observation, type Rules } from '@/lib/reporting';
-import { punctualityLabels, punctualityLevels } from '@/lib/monthly';
+import { foldPunctualityTally, punctualityLabels, punctualityLevels } from '@/lib/monthly';
 
 const punctualityLabel = (key: string) => punctualityLabels[key as keyof typeof punctualityLabels] ?? key.replaceAll('_', ' ');
 
@@ -82,10 +82,10 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
     const participation = tally('participation');
     const homework = tally('homework');
     const conduct = tally('conduct');
-    const punctuality = tally('punctuality');
+    const punctuality = foldPunctualityTally(tally('punctuality'));
 
     const punctualityTotal = Object.values(punctuality).reduce((a, b) => a + b, 0);
-    const punctualityOnTime = (punctuality.ALWAYS_ON_TIME || 0) + (punctuality.USUALLY_ON_TIME || 0);
+    const punctualityOnTime = punctuality.ALWAYS_ON_TIME || 0;
 
     return {
       totalObs,
@@ -193,7 +193,7 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
     const lines = [
       'Category,Item,Observation Count,Percentage',
       ...formatCsvSection('Performance', stats.performance),
-      ...formatCsvSection('Punctuality', stats.punctuality),
+      ...formatCsvSection('Punctuality', stats.punctuality, punctualityLabels),
       ...formatCsvSection('Participation', stats.participation),
       ...formatCsvSection('Homework', stats.homework),
       ...formatCsvSection('Conduct', stats.conduct),
@@ -209,8 +209,9 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
     setMsg(`Statistics CSV downloaded: ${fileName}`);
   };
 
-  const formatCsvSection = (title: string, obj: Record<string, number>) => {
+  const formatCsvSection = (title: string, obj: Record<string, number>, labelMap?: Record<string, string>) => {
     const total = Object.values(obj).reduce((a, b) => a + b, 0);
+    const label = (k: string) => labelMap?.[k] ?? k.replaceAll('_', ' ');
     return Object.entries(obj).map(([key, count]) =>
       `"${title}","${key.replace('_', ' ')}",${count},"${total ? Math.round((count / total) * 100) : 0}%"`
     );
@@ -319,9 +320,9 @@ useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(null), 700
         <DistributionCard
           title="Punctuality"
           data={punctualityLevels.map((key, i) => ({
-            label: punctualityLabels[key],
+            label: punctualityLabel(key),
             count: stats.punctuality[key] || 0,
-            color: ['#22a57d', '#3b82f6', '#d79c41', '#c67a53', '#b06a4e', '#8a4a32', '#5f3220'][i],
+            color: ['#22a57d', '#3b82f6', '#d79c41', '#c67a53', '#b06a4e'][i],
           }))}
         />
 

@@ -1,6 +1,6 @@
 import { db } from '@/db';
 import { organizations, users, sessions, teachers, students, grades, classes, subjects, academicYears, terms, assignments, lessons, records, auditLogs, settings, monthClosures, monthlyRuleSnapshots, behaviourObservations, clubs, clubTeachers, clubMembers, clubActivities, clubActivityRecords, monthlyEntries, monthlyStudentEntries, subjectStudents } from '@/db/schema';
-import { and, eq, desc, count, like, gte, lt, lte, inArray, or, sql, not } from 'drizzle-orm';
+import { and, eq, desc, count, like, gte, lt, lte, inArray, or, sql, not, ne, exists } from 'drizzle-orm';
 import { hash } from 'bcryptjs';
 import { z } from 'zod';
 import { AppError, audit, checkOrigin, orgFor, requireUser, schoolToday, dateMinus, teacherFor, validLessonDate, reportDatePolicy, reportWindowLabel, MIN_REPORT_WINDOW_DAYS, MAX_REPORT_WINDOW_DAYS } from '@/lib/security';
@@ -16,12 +16,14 @@ import { monthlyEntryInput, entryObservations, isValidMonth, monthOverlapsYear, 
 import { runTransaction } from '@/db';
 
 export const dynamic='force-dynamic';
-const fail=(e:unknown)=>{ if(e instanceof AppError){ console.error(`[api] AppError ${e.status}: ${e.message}`); return Response.json({error:e.message},{status:e.status}); } if(e instanceof z.ZodError){ console.error('[api] ZodError:', JSON.stringify(e.issues)); const detail=e.issues.slice(0,4).map(i=>`${i.path.join('.')||'value'}: ${i.message}`).join('; '); return Response.json({error:detail||'Invalid input'},{status:400}); } console.error('Application request failed',e); return Response.json({error:'The request could not be completed.'},{status:500}); };
+const fail=(e:unknown)=>{ if(e instanceof AppError){ console.error(`[api] AppError ${e.status}: ${e.message}`); return Response.json({error:e.message},{status:e.status}); } if(e instanceof z.ZodError){ console.error('[api] ZodError:', JSON.stringify(e.issues)); const detail=e.issues.slice(0,4).map(i=>`${i.path.join('.')||'value'}: ${i.message}`).join('; '); return Response.json({error:detail||'Invalid input'},{status:400}); } const message=e instanceof Error?e.message:''; if(/unique (constraint|index)/i.test(message)){ console.error('[api] unique constraint',message); return Response.json({error:'A record with those details already exists.'},{status:409}); } console.error('Application request failed',e); return Response.json({error:'The request could not be completed.'},{status:500}); };
 const str=(v:unknown)=>z.string().max(200).parse(v);
 // Academic year / term dates are compared as strings everywhere, so a malformed value would
 // silently break month-overlap and report-window checks for the whole school.
 const DATE_KEY_PATTERN=/^\d{4}-\d{2}-\d{2}$/;
 const parseDateKey=(v:string,label:string)=>{const s=String(v??'').trim();if(!DATE_KEY_PATTERN.test(s)||Number.isNaN(Date.parse(s)))throw new AppError(`${label} must be a valid date like 2026-08-01.`,400);return s;};
+// Mirrors the schema defaults so a missing settings row still yields usable numbers.
+const DEFAULT_SETTINGS={version:1,excellentThreshold:2.65,goodThreshold:1.65,homeworkUsuallyThreshold:0.8,punctualityOccasionallyMax:0.1,adminDateOverrideDays:14,adminCanOverrideFuture:true,adminOverrideRequiresReason:true};
 const isValidTimezone=(tz:string)=>{try{new Intl.DateTimeFormat('en-US',{timeZone:tz});return true}catch{return false}};
 // Roster size for completion rates: whole class until a subject roster exists for the pair.
 const rosterCountSql=(classCol:unknown,subjectCol:unknown)=>sql<number>`CAST((select count(*) from ${students} where ${students.classId}=${classCol} and ${students.status}='ACTIVE' and (not exists (select 1 from ${subjectStudents} sx where sx.class_id=${classCol} and sx.subject_id=${subjectCol} and exists (select 1 from ${students} s2 where s2.id=sx.student_id and s2.class_id=${classCol} and s2.status='ACTIVE')) or ${students.id} in (select sy.student_id from ${subjectStudents} sy where sy.class_id=${classCol} and sy.subject_id=${subjectCol}))) AS INTEGER)`;
@@ -29,7 +31,23 @@ export async function GET(req:Request){try{
  const user=await requireUser(); const url=new URL(req.url); const view=url.searchParams.get('view')||'overview';
  if(user.role==='SUPER_ADMIN'){
   if(view==='audit')return Response.json({logs:await db.select({id:auditLogs.id,organizationId:auditLogs.organizationId,userId:auditLogs.userId,username:users.username,name:users.name,action:auditLogs.action,entityType:auditLogs.entityType,entityId:auditLogs.entityId,metadata:auditLogs.metadata,createdAt:auditLogs.createdAt}).from(auditLogs).leftJoin(users,eq(users.id,auditLogs.userId)).orderBy(desc(auditLogs.createdAt)).limit(100)});
-   if(view==='organizations'){const orgs=await db.select().from(organizations).orderBy(organizations.name); const totals=await Promise.all(orgs.map(async o=>({ ...o,studentCount:(await db.select({n:count()}).from(students).where(eq(students.organizationId,o.id)))[0].n,teacherCount:(await db.select({n:count()}).from(teachers).where(eq(teachers.organizationId,o.id)))[0].n,classCount:(await db.select({n:count()}).from(classes).where(eq(classes.organizationId,o.id)))[0].n,admin:o.primaryAdminUserId?(await db.select({id:users.id,name:users.name,username:users.username,email:users.email}).from(users).where(eq(users.id,o.primaryAdminUserId)).limit(1))[0]||null:null }))); return Response.json({organizations:totals});}
+    if(view==='organizations'){
+     const orgs=await db.select().from(organizations).orderBy(organizations.name);
+     // Grouped counts instead of 4 queries per organization: at scale the per-row fan-out is
+     // 4N+1 round trips, each separately billed on D1.
+     const [studentCounts,teacherCounts,classCounts,admins]=await Promise.all([
+       db.select({organizationId:students.organizationId,n:count()}).from(students).groupBy(students.organizationId),
+       db.select({organizationId:teachers.organizationId,n:count()}).from(teachers).groupBy(teachers.organizationId),
+       db.select({organizationId:classes.organizationId,n:count()}).from(classes).groupBy(classes.organizationId),
+       db.select({id:users.id,name:users.name,username:users.username,email:users.email}).from(users).where(inArray(users.id,orgs.map(o=>o.primaryAdminUserId).filter((v):v is string=>!!v))),
+     ]);
+     const studentsByOrg=new Map(studentCounts.map(r=>[r.organizationId,r.n]));
+     const teachersByOrg=new Map(teacherCounts.map(r=>[r.organizationId,r.n]));
+     const classesByOrg=new Map(classCounts.map(r=>[r.organizationId,r.n]));
+     const adminById=new Map(admins.map(a=>[a.id,a]));
+     const totals=orgs.map(o=>({...o,studentCount:studentsByOrg.get(o.id)||0,teacherCount:teachersByOrg.get(o.id)||0,classCount:classesByOrg.get(o.id)||0,admin:o.primaryAdminUserId?adminById.get(o.primaryAdminUserId)||null:null}));
+     return Response.json({organizations:totals});
+    }
   if(view==='overview'){const today=new Date().toISOString().slice(0,10);return Response.json({role:user.role,name:user.name,organization:'Platform',today,windowDays:14,minDate:dateMinus(today,14),counts:{students:0,teachers:0,classes:0,subjects:0,totalReports:0},statusCounts:{},assignedClasses:[],assignedSubjects:[],assignments:[],recent:[],organizations:(await db.select({n:count()}).from(organizations))[0].n});}
    return Response.json({role:user.role,name:user.name,organizations:(await db.select({n:count()}).from(organizations))[0].n});
  }
@@ -98,7 +116,9 @@ export async function GET(req:Request){try{
   const sort=url.searchParams.get('sort')==='class'?'class':'name';
   const page=z.coerce.number().int().min(0).max(10000).parse(url.searchParams.get('page')||'0');
   if(teacher){if(!classId||!(await db.select({id:assignments.id}).from(assignments).where(and(myAssignment,eq(assignments.classId,classId))).limit(1)).length)throw new AppError('Class access denied.',403);}
-  const rows=await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,firstName:students.firstName,lastName:students.lastName,classId:students.classId,gradeId:students.gradeId,academicYearId:students.academicYearId,status:students.status,className:classes.name}).from(students).innerJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),classId?eq(students.classId,classId):undefined,teacher?eq(students.status,'ACTIVE'):undefined,search?or(like(students.fullName,`%${search}%`),like(students.studentId,`%${search}%`),like(classes.name,`%${search}%`)):undefined)).orderBy(sort==='class'?classes.name:students.fullName,students.fullName,students.id).limit(roster?151:51).offset(roster?0:page*50);
+  // Fetch one past the limit so the 200-student form ceiling below is actually reachable:
+  // capping at 151 made the guard dead code and silently truncated classes of 152-200.
+  const rows=await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,firstName:students.firstName,lastName:students.lastName,classId:students.classId,gradeId:students.gradeId,academicYearId:students.academicYearId,status:students.status,className:classes.name}).from(students).innerJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),classId?eq(students.classId,classId):undefined,teacher?eq(students.status,'ACTIVE'):undefined,search?or(like(students.fullName,`%${search}%`),like(students.studentId,`%${search}%`),like(classes.name,`%${search}%`)):undefined)).orderBy(sort==='class'?classes.name:students.fullName,students.fullName,students.id).limit(roster?201:51).offset(roster?0:page*50);
   if(roster&&rows.length>200)throw new AppError('Class roster exceeds the 200-student form limit. Ask your administrator to split the class.');
   return Response.json({students:roster?rows:rows.slice(0,50),page,hasMore:!roster&&rows.length>50});
  }
@@ -107,7 +127,7 @@ export async function GET(req:Request){try{
    const id=z.string().uuid().parse(url.searchParams.get('id'));
    const [student]=await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,status:students.status,className:classes.name}).from(students).innerJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.id,id),eq(students.organizationId,org.id))).limit(1);
    if(!student)throw new AppError('Student not found.',404);
-    const timeline=await db.select({lessonDate:lessons.lessonDate,subject:sql<string>`coalesce(${lessons.subjectNameSnapshot}, ${subjects.name})`,topic:lessons.topic,attendance:records.attendanceStatus,performance:records.performance,conduct:records.conduct,punctuality:records.punctuality,homework:records.homework,participation:records.participation,comment:records.comment,status:lessons.status}).from(records).innerJoin(lessons,eq(lessons.id,records.monthlyLessonId)).innerJoin(subjects,eq(subjects.id,lessons.subjectId)).where(and(eq(records.studentId,id),eq(records.organizationId,org.id),eq(lessons.organizationId,org.id))).orderBy(desc(lessons.lessonDate)).limit(100);
+    const timeline=await db.select({lessonDate:lessons.lessonDate,subject:sql<string>`coalesce(${lessons.subjectNameSnapshot}, ${subjects.name})`,topic:lessons.topic,attendance:records.attendanceStatus,performance:records.performance,conduct:records.conduct,punctuality:records.punctuality,homework:records.homework,participation:records.participation,comment:records.comment,status:lessons.status}).from(records).innerJoin(lessons,eq(lessons.id,records.monthlyLessonId)).innerJoin(subjects,eq(subjects.id,lessons.subjectId)).where(and(eq(records.studentId,id),eq(records.organizationId,org.id),eq(lessons.organizationId,org.id),inArray(lessons.status,['SUBMITTED','UNDER_REVIEW','APPROVED']))).orderBy(desc(lessons.lessonDate)).limit(100);
     // §193: one monthly row per subject on the student timeline.
     const monthlyTimeline=(await db.select({month:monthlyEntries.month,subject:sql<string>`coalesce(${monthlyEntries.subjectNameSnapshot}, ${subjects.name})`,topic:monthlyEntries.topics,status:monthlyEntries.status,punctuality:monthlyStudentEntries.punctuality,performance:monthlyStudentEntries.performance,conduct:monthlyStudentEntries.conduct,homework:monthlyStudentEntries.homework,participation:monthlyStudentEntries.participation,comment:monthlyStudentEntries.comment}).from(monthlyStudentEntries).innerJoin(monthlyEntries,eq(monthlyEntries.id,monthlyStudentEntries.monthlyEntryId)).innerJoin(subjects,eq(subjects.id,monthlyEntries.subjectId)).where(and(eq(monthlyStudentEntries.studentId,id),eq(monthlyEntries.organizationId,org.id),inArray(monthlyEntries.status,['SUBMITTED','UNDER_REVIEW','APPROVED']))).orderBy(desc(monthlyEntries.month)).limit(100)).map(r=>{
       // §193 v3: pass the selected punctuality category through unchanged; the
@@ -231,18 +251,24 @@ const lessonRecords = await db.select({
     const reportStudentIds=[...new Set(data.map(r=>r.studentId))];
     let clubsByStudent:Record<string,StudentClubSummary[]>={};
     if(reportStudentIds.length){
-      const memberRows=await db.select({studentId:clubMembers.studentId,clubId:clubMembers.clubId,clubName:clubs.name}).from(clubMembers).innerJoin(clubs,eq(clubs.id,clubMembers.clubId)).where(and(eq(clubs.organizationId,org.id),inArray(clubMembers.studentId,reportStudentIds))).limit(5000);
+      const memberRows=await db.select({studentId:clubMembers.studentId,clubId:clubMembers.clubId,clubName:clubs.name}).from(clubMembers).innerJoin(clubs,eq(clubs.id,clubMembers.clubId)).where(and(eq(clubs.organizationId,org.id),inArray(clubMembers.studentId,reportStudentIds))).limit(5001);
+      if(memberRows.length>5000) throw new AppError('These students belong to more than 5,000 club memberships. Filter by class to narrow the report.',413);
       const clubIds=[...new Set(memberRows.map(m=>m.clubId))];
       let activityRows:{id:string;clubId:string;activityDate:string;title:string}[]=[];
-      if(clubIds.length) activityRows=await db.select({id:clubActivities.id,clubId:clubActivities.clubId,activityDate:clubActivities.activityDate,title:clubActivities.title}).from(clubActivities).where(inArray(clubActivities.clubId,clubIds)).limit(5000);
+      // Both queries must be bounded by what summarizeClubs() keeps — the period and these students.
+      // Counting a club's whole history and then throwing would kill the report on data it discards.
+      if(clubIds.length){ activityRows=await db.select({id:clubActivities.id,clubId:clubActivities.clubId,activityDate:clubActivities.activityDate,title:clubActivities.title}).from(clubActivities).where(and(inArray(clubActivities.clubId,clubIds),gte(clubActivities.activityDate,period.from),lte(clubActivities.activityDate,period.to))).limit(5001);
+        if(activityRows.length>5000) throw new AppError('This period contains more than 5,000 club activities for these students. Shorten the date range to narrow the report.',413);
+      }
       const clubNameById=new Map(memberRows.map(m=>[m.clubId,m.clubName]));
-      let recordRows:{studentId:string;clubId:string;activityId:string;activityDate:string;title:string;performance:string|null;comment:string|null}[]=[];
+      let recordRows:{studentId:string;clubId:string;activityId:string;activityDate:string;title:string;performance:string|null;comment:string|null;punctuality:string|null;participation:string|null;conduct:string|null}[]=[];
       if(activityRows.length){
-        recordRows=await db.select({studentId:clubActivityRecords.studentId,clubId:clubActivities.clubId,activityId:clubActivityRecords.clubActivityId,activityDate:clubActivities.activityDate,title:clubActivities.title,performance:clubActivityRecords.performance,comment:clubActivityRecords.comment}).from(clubActivityRecords).innerJoin(clubActivities,eq(clubActivities.id,clubActivityRecords.clubActivityId)).where(inArray(clubActivityRecords.clubActivityId,activityRows.map(a=>a.id))).limit(5000);
+        recordRows=await db.select({studentId:clubActivityRecords.studentId,clubId:clubActivities.clubId,activityId:clubActivityRecords.clubActivityId,activityDate:clubActivities.activityDate,title:clubActivities.title,performance:clubActivityRecords.performance,comment:clubActivityRecords.comment,punctuality:clubActivityRecords.punctuality,participation:clubActivityRecords.participation,conduct:clubActivityRecords.conduct}).from(clubActivityRecords).innerJoin(clubActivities,eq(clubActivities.id,clubActivityRecords.clubActivityId)).where(and(inArray(clubActivityRecords.clubActivityId,activityRows.map(a=>a.id)),inArray(clubActivityRecords.studentId,reportStudentIds),gte(clubActivities.activityDate,period.from),lte(clubActivities.activityDate,period.to))).limit(5001);
+        if(recordRows.length>5000) throw new AppError('This period contains more than 5,000 club activity records for these students. Shorten the date range to narrow the report.',413);
       }
       clubsByStudent=summarizeClubs(
         memberRows.map(m=>({studentId:m.studentId,clubName:m.clubName})),
-        recordRows.map(r=>({studentId:r.studentId,clubName:clubNameById.get(r.clubId)||'',activityId:r.activityId,activityDate:r.activityDate,title:r.title,performance:r.performance,comment:r.comment})),
+        recordRows.map(r=>({studentId:r.studentId,clubName:clubNameById.get(r.clubId)||'',activityId:r.activityId,activityDate:r.activityDate,title:r.title,performance:r.performance,comment:r.comment,punctuality:r.punctuality,participation:r.participation,conduct:r.conduct})),
         period.months
       );
     }
@@ -306,10 +332,14 @@ const lessonRecords = await db.select({
    const month=z.string().regex(MONTH_PATTERN,'Month must be in YYYY-MM format.').parse(url.searchParams.get('month'));
    const classId=url.searchParams.get('classId'); const subjectId=url.searchParams.get('subjectId'); const statusFilter=url.searchParams.get('status'); const teacherFilter=url.searchParams.get('teacherId');
    const [closedRow]=await db.select({closed:monthClosures.closed}).from(monthClosures).where(and(eq(monthClosures.organizationId,org.id),eq(monthClosures.month,month))).limit(1);
-   const entryRows=await db.select({entry:monthlyEntries,className:classes.name,subjectName:subjects.name,teacherName:teachers.name,studentCount:sql<number>`CAST((select count(*) from ${monthlyStudentEntries} where ${monthlyStudentEntries.monthlyEntryId}=${monthlyEntries.id}) AS INTEGER)`}).from(monthlyEntries).innerJoin(classes,eq(classes.id,monthlyEntries.classId)).innerJoin(subjects,eq(subjects.id,monthlyEntries.subjectId)).innerJoin(teachers,eq(teachers.id,monthlyEntries.teacherId)).where(and(eq(monthlyEntries.organizationId,org.id),eq(monthlyEntries.month,month),teacher?eq(monthlyEntries.teacherId,teacher.id):undefined,teacherFilter?eq(monthlyEntries.teacherId,teacherFilter):undefined,classId?eq(monthlyEntries.classId,classId):undefined,subjectId?eq(monthlyEntries.subjectId,subjectId):undefined,statusFilter?eq(monthlyEntries.status,statusFilter):undefined)).orderBy(classes.name,subjects.name).limit(300);
+   const entryRows=await db.select({entry:monthlyEntries,className:classes.name,subjectName:subjects.name,teacherName:teachers.name,studentCount:sql<number>`CAST((select count(*) from ${monthlyStudentEntries} where ${monthlyStudentEntries.monthlyEntryId}=${monthlyEntries.id}) AS INTEGER)`}).from(monthlyEntries).innerJoin(classes,eq(classes.id,monthlyEntries.classId)).innerJoin(subjects,eq(subjects.id,monthlyEntries.subjectId)).innerJoin(teachers,eq(teachers.id,monthlyEntries.teacherId)).where(and(eq(monthlyEntries.organizationId,org.id),eq(monthlyEntries.month,month),teacher?eq(monthlyEntries.teacherId,teacher.id):undefined,teacherFilter?eq(monthlyEntries.teacherId,teacherFilter):undefined,classId?eq(monthlyEntries.classId,classId):undefined,subjectId?eq(monthlyEntries.subjectId,subjectId):undefined,statusFilter?eq(monthlyEntries.status,statusFilter):undefined)).orderBy(classes.name,subjects.name).limit(5001);
+   // The checklist reads the whole month in one call (its client never sends a class or subject
+   // filter), so this ceiling is a safety net against a pathological payload, not a page size.
+   if(entryRows.length>5000) throw new AppError('This month has more than 5,000 class-subject records, which the filing checklist cannot display. Report this to your administrator.',413);
    const entries=entryRows.map(r=>({id:r.entry.id,classId:r.entry.classId,subjectId:r.entry.subjectId,teacherId:r.entry.teacherId,month:r.entry.month,status:r.entry.status,sessionsHeld:r.entry.sessionsHeld,topics:r.entry.topics,submittedAt:r.entry.submittedAt,updatedAt:r.entry.updatedAt,className:r.className,subjectName:r.subjectName,teacherName:r.entry.teacherNameSnapshot||r.teacherName,studentCount:r.studentCount}));
    const plannedKeys=new Set(entryRows.map(r=>`${r.entry.classId}|${r.entry.subjectId}`));
-   const assignmentRows=await db.select({classId:assignments.classId,subjectId:assignments.subjectId,className:classes.name,subjectName:subjects.name,teacherId:assignments.teacherId,teacherName:teachers.name}).from(assignments).innerJoin(classes,eq(classes.id,assignments.classId)).innerJoin(subjects,eq(subjects.id,assignments.subjectId)).innerJoin(teachers,eq(teachers.id,assignments.teacherId)).where(and(eq(assignments.organizationId,org.id),eq(assignments.active,true),teacher?eq(assignments.teacherId,teacher.id):undefined,teacherFilter?eq(assignments.teacherId,teacherFilter):undefined,classId?eq(assignments.classId,classId):undefined,subjectId?eq(assignments.subjectId,subjectId):undefined)).orderBy(classes.name,subjects.name).limit(400);
+   const assignmentRows=await db.select({classId:assignments.classId,subjectId:assignments.subjectId,className:classes.name,subjectName:subjects.name,teacherId:assignments.teacherId,teacherName:teachers.name}).from(assignments).innerJoin(classes,eq(classes.id,assignments.classId)).innerJoin(subjects,eq(subjects.id,assignments.subjectId)).innerJoin(teachers,eq(teachers.id,assignments.teacherId)).where(and(eq(assignments.organizationId,org.id),eq(assignments.active,true),teacher?eq(assignments.teacherId,teacher.id):undefined,teacherFilter?eq(assignments.teacherId,teacherFilter):undefined,classId?eq(assignments.classId,classId):undefined,subjectId?eq(assignments.subjectId,subjectId):undefined)).orderBy(classes.name,subjects.name).limit(5001);
+   if(assignmentRows.length>5000) throw new AppError('This school has more than 5,000 active class-subject assignments, which the filing checklist cannot display. Report this to your administrator.',413);
    const planned=assignmentRows.filter(a=>!plannedKeys.has(`${a.classId}|${a.subjectId}`)).map(a=>({...a,month,status:'MISSING',studentCount:0}));
     return Response.json({month,entries,planned,closed:!!closedRow?.closed});
   }
@@ -355,11 +385,10 @@ const lessonRecords = await db.select({
   }
   if(view==='audit'){if(user.role!=='ADMIN') throw new AppError('Access denied.',403);return Response.json({logs:await db.select({id:auditLogs.id,organizationId:auditLogs.organizationId,userId:auditLogs.userId,username:users.username,name:users.name,action:auditLogs.action,entityType:auditLogs.entityType,entityId:auditLogs.entityId,metadata:auditLogs.metadata,createdAt:auditLogs.createdAt}).from(auditLogs).leftJoin(users,eq(users.id,auditLogs.userId)).where(eq(auditLogs.organizationId,org.id)).orderBy(desc(auditLogs.createdAt)).limit(100)});}
  if(view==='settings'){if(user.role!=='ADMIN') throw new AppError('Access denied.',403);
-  // A freshly provisioned organization can miss its settings row; create it with schema
-  // defaults rather than handing the settings screen an undefined object.
-  let [cfg]=await db.select().from(settings).where(eq(settings.organizationId,org.id));
-  if(!cfg){await db.insert(settings).values({organizationId:org.id}).onConflictDoNothing();cfg=(await db.select().from(settings).where(eq(settings.organizationId,org.id)))[0];}
-  return Response.json({settings:cfg,closures:await db.select().from(monthClosures).where(eq(monthClosures.organizationId,org.id)),organization:org});}
+  // Organization provisioning and the settings action both create this row, so a read no longer
+  // needs to write. Returning schema defaults keeps the screen working if it is ever missing.
+  const [cfg]=await db.select().from(settings).where(eq(settings.organizationId,org.id));
+  return Response.json({settings:cfg||{organizationId:org.id,...DEFAULT_SETTINGS},closures:await db.select().from(monthClosures).where(eq(monthClosures.organizationId,org.id)),organization:org});}
  if(view==='clubs'){
   const allClubs=await db.select().from(clubs).where(eq(clubs.organizationId,org.id)).orderBy(clubs.name);
   const assigned=teacher?(await db.select({clubId:clubTeachers.clubId}).from(clubTeachers).where(eq(clubTeachers.teacherId,teacher.id))).map(r=>r.clubId):null;
@@ -369,6 +398,9 @@ const lessonRecords = await db.select({
   let members:{clubId:string;studentId:string;studentName:string;studentCode:string;className:string|null}[]=[];
   let activities:(typeof clubActivities.$inferSelect)[]=[];
   let records:{id:string;clubActivityId:string;studentId:string;studentName:string;studentCode:string;punctuality:string|null;performance:string|null;participation:string|null;conduct:string|null;comment:string|null}[]=[];
+  // Nothing here deletes club history, so refusing the whole screen past 5,000 rows would leave an
+  // admin with no way in. Truncate explicitly instead and let the screen say how much is missing.
+  let recordsTruncated=false; let recordsTotal=0;
   if(ids.length){
    const [clubTeacherRows,memberRows,activityRows]=await Promise.all([
     db.select({clubId:clubTeachers.clubId,teacherId:clubTeachers.teacherId,role:clubTeachers.role,teacherName:teachers.name,active:teachers.active}).from(clubTeachers).innerJoin(teachers,eq(teachers.id,clubTeachers.teacherId)).where(inArray(clubTeachers.clubId,ids)).orderBy(teachers.name),
@@ -378,13 +410,18 @@ const lessonRecords = await db.select({
    assignedTeachers=clubTeacherRows;members=memberRows;activities=activityRows;
    const activityIds=activityRows.map(a=>a.id);
    if(activityIds.length){
-    records=await db.select({id:clubActivityRecords.id,clubActivityId:clubActivityRecords.clubActivityId,studentId:clubActivityRecords.studentId,studentName:sql<string>`coalesce(${clubActivityRecords.studentNameSnapshot}, ${students.fullName})`,studentCode:sql<string>`coalesce(${clubActivityRecords.studentCodeSnapshot}, ${students.studentId})`,punctuality:clubActivityRecords.punctuality,performance:clubActivityRecords.performance,participation:clubActivityRecords.participation,conduct:clubActivityRecords.conduct,comment:clubActivityRecords.comment}).from(clubActivityRecords).innerJoin(students,eq(students.id,clubActivityRecords.studentId)).where(inArray(clubActivityRecords.clubActivityId,activityIds)).orderBy(students.fullName).limit(5000);
+    records=await db.select({id:clubActivityRecords.id,clubActivityId:clubActivityRecords.clubActivityId,studentId:clubActivityRecords.studentId,studentName:sql<string>`coalesce(${clubActivityRecords.studentNameSnapshot}, ${students.fullName})`,studentCode:sql<string>`coalesce(${clubActivityRecords.studentCodeSnapshot}, ${students.studentId})`,punctuality:clubActivityRecords.punctuality,performance:clubActivityRecords.performance,participation:clubActivityRecords.participation,conduct:clubActivityRecords.conduct,comment:clubActivityRecords.comment}).from(clubActivityRecords).innerJoin(students,eq(students.id,clubActivityRecords.studentId)).where(inArray(clubActivityRecords.clubActivityId,activityIds)).orderBy(students.fullName).limit(5001);
+    if(records.length>5000){records=records.slice(0,5000);recordsTruncated=true;
+      const [total]=await db.select({n:sql<number>`CAST(count(*) AS INTEGER)`}).from(clubActivityRecords).where(inArray(clubActivityRecords.clubActivityId,activityIds));
+      recordsTotal=Number(total?.n)||records.length;
+    }else recordsTotal=records.length;
    }
   }
   const teacherOptions=user.role==='ADMIN'?await db.select({id:teachers.id,name:teachers.name,active:teachers.active}).from(teachers).where(eq(teachers.organizationId,org.id)).orderBy(teachers.name):[];
   // A teacher only ever picks from the children they already reach: their assigned classes or their
   // own club rosters. The school-wide list stays behind the assignment gate that view=students uses.
   let studentOptions:{id:string;studentId:string;fullName:string;classId:string;className:string|null}[]=[];
+  let otherMemberships:{studentId:string;clubId:string;clubName:string}[]=[];
   if(user.role==='TEACHER'&&teacher){
    const assignedClassIds=(await db.selectDistinct({id:assignments.classId}).from(assignments).where(myAssignment)).map(r=>r.id);
    const myClubIds=(await db.select({id:clubTeachers.clubId}).from(clubTeachers).where(eq(clubTeachers.teacherId,teacher.id))).map(r=>r.id);
@@ -392,9 +429,14 @@ const lessonRecords = await db.select({
    const byClass=assignedClassIds.length?inArray(students.classId,assignedClassIds):undefined;
    const byClub=memberIds.length?inArray(students.id,memberIds):undefined;
    const gate=byClass&&byClub?or(byClass,byClub):(byClass||byClub);
-   if(gate) studentOptions=await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,classId:students.classId,className:classes.name}).from(students).leftJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),eq(students.status,'ACTIVE'),gate)).orderBy(students.fullName).limit(2000);
+    if(gate) studentOptions=await db.select({id:students.id,studentId:students.studentId,fullName:students.fullName,classId:students.classId,className:classes.name}).from(students).leftJoin(classes,eq(classes.id,students.classId)).where(and(eq(students.organizationId,org.id),eq(students.status,'ACTIVE'),gate)).orderBy(students.fullName).limit(2000);
+    // A teacher may pick a child from an assigned class who already sits in a club they cannot see
+    // (`members` only covers their own clubs). One club per child, so this map is at most one row
+    // per option — without it the "already belongs to another club" confirmation never fires for them.
+    const optionIds=studentOptions.map(s=>s.id);
+    if(optionIds.length) otherMemberships=await db.select({studentId:clubMembers.studentId,clubId:clubMembers.clubId,clubName:clubs.name}).from(clubMembers).innerJoin(clubs,eq(clubs.id,clubMembers.clubId)).where(and(eq(clubs.organizationId,org.id),inArray(clubMembers.studentId,optionIds))).limit(2001);
   }
-   return Response.json({clubs:scoped,teachers:assignedTeachers,members,activities,records,teacherOptions,studentOptions,role:user.role});
+   return Response.json({clubs:scoped,teachers:assignedTeachers,members,activities,records,recordsTruncated,recordsTotal,teacherOptions,studentOptions,otherMemberships,role:user.role});
   }
   // Academic profile behind the club follow-up report: the child's ratings across every subject,
   // returned as raw mixes plus the same headline results the main report uses, so the card can show
@@ -426,12 +468,21 @@ const lessonRecords = await db.select({
    const rules=settingsRow;
    const monthFrom=period.months[0]||period.from.slice(0,7);
    const monthTo=period.months[period.months.length-1]||period.to.slice(0,7);
-   const entryHeader=await db.select({entry:monthlyEntries,className:classes.name,subjectName:subjects.name,teacherName:teachers.name}).from(monthlyEntries).innerJoin(classes,eq(classes.id,monthlyEntries.classId)).innerJoin(subjects,eq(subjects.id,monthlyEntries.subjectId)).innerJoin(teachers,eq(teachers.id,monthlyEntries.teacherId)).where(and(eq(monthlyEntries.organizationId,org.id),inArray(monthlyEntries.status,['SUBMITTED','UNDER_REVIEW','APPROVED']),gte(monthlyEntries.month,monthFrom),lte(monthlyEntries.month,monthTo))).limit(1000);
+   // Only entries that carry a row for one of these students can contribute to their profiles, and
+   // those same entries are exactly what the legacy/monthly dedupe needs. Counting every entry in
+   // the school would refuse the whole view for a school these students never touch.
+   const carriesOwnRow=exists(db.select({one:sql`1`}).from(monthlyStudentEntries).where(and(eq(monthlyStudentEntries.monthlyEntryId,monthlyEntries.id),inArray(monthlyStudentEntries.studentId,allowed))));
+   const entryHeader=await db.select({entry:monthlyEntries,className:classes.name,subjectName:subjects.name,teacherName:teachers.name}).from(monthlyEntries).innerJoin(classes,eq(classes.id,monthlyEntries.classId)).innerJoin(subjects,eq(subjects.id,monthlyEntries.subjectId)).innerJoin(teachers,eq(teachers.id,monthlyEntries.teacherId)).where(and(eq(monthlyEntries.organizationId,org.id),inArray(monthlyEntries.status,['SUBMITTED','UNDER_REVIEW','APPROVED']),gte(monthlyEntries.month,monthFrom),lte(monthlyEntries.month,monthTo),carriesOwnRow)).orderBy(monthlyEntries.month).limit(1001);
+   // A silent cap here is worse than an error: `monthlyKeys` drives the legacy/monthly dedupe, so
+   // a dropped header both omits its monthly rows and re-counts its legacy rows. Refuse instead.
+   if(entryHeader.length>1000) throw new AppError('These students have more than 1,000 monthly records in this period. Shorten the date range to build their club profiles.',413);
    const monthlyKeys=new Set(entryHeader.map(h=>`${h.entry.classId}|${h.entry.subjectId}|${h.entry.month}`));
-   const legacyRows=await db.select({classId:lessons.classId,subjectId:lessons.subjectId,lessonDate:lessons.lessonDate,topic:lessons.topic,lessonId:lessons.id,status:lessons.status,studentId:students.id,studentName:sql<string>`coalesce(${records.studentNameSnapshot}, ${students.fullName})`,studentCode:sql<string>`coalesce(${records.studentCodeSnapshot}, ${students.studentId})`,className:sql<string>`coalesce(${lessons.classNameSnapshot}, ${classes.name})`,subjectName:sql<string>`coalesce(${lessons.subjectNameSnapshot}, ${subjects.name})`,teacherName:sql<string>`coalesce(${lessons.teacherNameSnapshot}, ${teachers.name})`,attendance:records.attendanceStatus,performance:records.performance,conduct:records.conduct,punctuality:records.punctuality,homework:records.homework,participation:records.participation,comment:records.comment}).from(records).innerJoin(lessons,eq(lessons.id,records.monthlyLessonId)).innerJoin(students,eq(students.id,records.studentId)).innerJoin(classes,eq(classes.id,lessons.classId)).innerJoin(subjects,eq(subjects.id,lessons.subjectId)).innerJoin(teachers,eq(teachers.id,lessons.teacherId)).where(and(eq(lessons.organizationId,org.id),inArray(lessons.status,['SUBMITTED','UNDER_REVIEW','APPROVED']),gte(lessons.lessonDate,period.from),lte(lessons.lessonDate,period.to),inArray(records.studentId,allowed))).orderBy(lessons.lessonDate).limit(20000);
-   const observations:Observation[]=legacyRows.filter(r=>!monthlyKeys.has(`${r.classId}|${r.subjectId}|${r.lessonDate.slice(0,7)}`)) as unknown as Observation[];
-   if(entryHeader.length){
-    const studentRows=await db.select({monthlyEntryId:monthlyStudentEntries.monthlyEntryId,studentId:students.id,studentName:sql<string>`coalesce(${monthlyStudentEntries.studentNameSnapshot}, ${students.fullName})`,studentCode:sql<string>`coalesce(${monthlyStudentEntries.studentCodeSnapshot}, ${students.studentId})`,punctuality:monthlyStudentEntries.punctuality,performance:monthlyStudentEntries.performance,participation:monthlyStudentEntries.participation,homework:monthlyStudentEntries.homework,conduct:monthlyStudentEntries.conduct,comment:monthlyStudentEntries.comment}).from(monthlyStudentEntries).innerJoin(students,eq(students.id,monthlyStudentEntries.studentId)).where(inArray(monthlyStudentEntries.monthlyEntryId,entryHeader.map(h=>h.entry.id))).orderBy(students.fullName).limit(20000);
+    const legacyRows=await db.select({classId:lessons.classId,subjectId:lessons.subjectId,lessonDate:lessons.lessonDate,topic:lessons.topic,lessonId:lessons.id,status:lessons.status,studentId:students.id,studentName:sql<string>`coalesce(${records.studentNameSnapshot}, ${students.fullName})`,studentCode:sql<string>`coalesce(${records.studentCodeSnapshot}, ${students.studentId})`,className:sql<string>`coalesce(${lessons.classNameSnapshot}, ${classes.name})`,subjectName:sql<string>`coalesce(${lessons.subjectNameSnapshot}, ${subjects.name})`,teacherName:sql<string>`coalesce(${lessons.teacherNameSnapshot}, ${teachers.name})`,attendance:records.attendanceStatus,performance:records.performance,conduct:records.conduct,punctuality:records.punctuality,homework:records.homework,participation:records.participation,comment:records.comment}).from(records).innerJoin(lessons,eq(lessons.id,records.monthlyLessonId)).innerJoin(students,eq(students.id,records.studentId)).innerJoin(classes,eq(classes.id,lessons.classId)).innerJoin(subjects,eq(subjects.id,lessons.subjectId)).innerJoin(teachers,eq(teachers.id,lessons.teacherId)).where(and(eq(lessons.organizationId,org.id),inArray(lessons.status,['SUBMITTED','UNDER_REVIEW','APPROVED']),gte(lessons.lessonDate,period.from),lte(lessons.lessonDate,period.to),inArray(records.studentId,allowed))).orderBy(lessons.lessonDate).limit(20001);
+    if(legacyRows.length>20000) throw new AppError('These students have more than 20,000 recorded observations in this period. Shorten the date range to build their club profiles.',413);
+    const observations:Observation[]=legacyRows.filter(r=>!monthlyKeys.has(`${r.classId}|${r.subjectId}|${r.lessonDate.slice(0,7)}`)) as unknown as Observation[];
+    if(entryHeader.length){
+      const studentRows=await db.select({monthlyEntryId:monthlyStudentEntries.monthlyEntryId,studentId:students.id,studentName:sql<string>`coalesce(${monthlyStudentEntries.studentNameSnapshot}, ${students.fullName})`,studentCode:sql<string>`coalesce(${monthlyStudentEntries.studentCodeSnapshot}, ${students.studentId})`,punctuality:monthlyStudentEntries.punctuality,performance:monthlyStudentEntries.performance,participation:monthlyStudentEntries.participation,homework:monthlyStudentEntries.homework,conduct:monthlyStudentEntries.conduct,comment:monthlyStudentEntries.comment}).from(monthlyStudentEntries).innerJoin(students,eq(students.id,monthlyStudentEntries.studentId)).where(and(inArray(monthlyStudentEntries.monthlyEntryId,entryHeader.map(h=>h.entry.id)),inArray(monthlyStudentEntries.studentId,allowed))).orderBy(students.fullName).limit(20001);
+     if(studentRows.length>20000) throw new AppError('These students have more than 20,000 recorded observations in this period. Shorten the date range to build their club profiles.',413);
     const rowsByEntry=new Map<string,MonthlyStudentRow[]>();
     for(const row of studentRows){const list=rowsByEntry.get(row.monthlyEntryId)||[];list.push(row);rowsByEntry.set(row.monthlyEntryId,list);}
     const scope=new Set(allowed);
@@ -535,8 +586,17 @@ export async function POST(req:Request){try{
        const moved=await tx.update(monthlyEntries).set({academicYearId:year.id,sessionsHeld:x.sessionsHeld,topics:x.topics.trim(),status,classNameSnapshot:cls.name,subjectNameSnapshot:sub.name,submittedAt:x.submit?new Date():existing.submittedAt,reviewedAt:x.submit?null:existing.reviewedAt,reviewedBy:x.submit?null:existing.reviewedBy,reviewComment:x.submit?null:existing.reviewComment,updatedAt:new Date()}).where(and(eq(monthlyEntries.id,existing.id),eq(monthlyEntries.status,existing.status))).returning({id:monthlyEntries.id});
        if(!moved.length)throw new AppError('That report changed while you were editing it. Reload and try again.',409);
       }else{
-       const [created]=await tx.insert(monthlyEntries).values({organizationId:oid,classId:x.classId,subjectId:x.subjectId,academicYearId:year.id,teacherId,month:x.month,sessionsHeld:x.sessionsHeld,topics:x.topics.trim(),status,classNameSnapshot:cls.name,subjectNameSnapshot:sub.name,teacherNameSnapshot:teacherName,submittedAt:x.submit?new Date():null}).returning();
-       id=created.id;
+       try{
+        const [created]=await tx.insert(monthlyEntries).values({organizationId:oid,classId:x.classId,subjectId:x.subjectId,academicYearId:year.id,teacherId,month:x.month,sessionsHeld:x.sessionsHeld,topics:x.topics.trim(),status,classNameSnapshot:cls.name,subjectNameSnapshot:sub.name,teacherNameSnapshot:teacherName,submittedAt:x.submit?new Date():null}).returning();
+        id=created.id;
+       }catch(e){
+        // Two tabs can both pass the "no existing entry" check; the unique index is the real
+        // guard, so translate its failure instead of surfacing a raw constraint error.
+        // Only a unique violation means someone else filed this first: a foreign-key or NOT NULL
+        // failure must fall through to the 500 handler instead of being reported as a duplicate.
+        if(/unique (constraint|index)/i.test(e instanceof Error?e.message:''))throw new AppError('Another teacher has already started this month\u2019s record for this class and subject.',409);
+        throw e;
+       }
       }
       // D1 cannot roll back, so never start by emptying the record: write every student row first
       // (upserting the ones that already exist), then drop only what the payload no longer contains.
@@ -644,6 +704,14 @@ export async function POST(req:Request){try{
   const loadActivity=async(id:string)=>{const [activity]=await db.select().from(clubActivities).where(and(eq(clubActivities.id,id),eq(clubActivities.organizationId,oid))).limit(1);if(!activity)throw new AppError('Activity not found.',404);return activity;};
   const verifyRows=async(ids:string[],table:typeof teachers|typeof students,label:string)=>{if(!ids.length)return;const rows=await db.select({id:table.id}).from(table).where(and(eq(table.organizationId,oid),inArray(table.id,ids)));if(new Set(rows.map(r=>r.id)).size!==new Set(ids).size)throw new AppError(`One or more ${label} are not part of this school.`);};
   const verifyYear=async(yearId:string|null|undefined)=>{if(!yearId)return;const [y]=await db.select({id:academicYears.id}).from(academicYears).where(and(eq(academicYears.id,yearId),eq(academicYears.organizationId,oid))).limit(1);if(!y)throw new AppError('Academic year not found.',404);};
+  // §one-club rule: a child belongs to exactly one club. Run after the inserts above so a
+  // mid-way failure (D1 cannot roll back) never drops a child from their previous club
+  // without landing them in the new one.
+  const leaveOtherClubs=async(tx:any,clubId:string,studentIds:string[])=>{
+   if(!studentIds.length)return;
+   const others=await tx.select({id:clubMembers.id}).from(clubMembers).where(and(eq(clubMembers.organizationId,oid),inArray(clubMembers.studentId,studentIds),ne(clubMembers.clubId,clubId)));
+   if(others.length)await tx.delete(clubMembers).where(inArray(clubMembers.id,others.map((r:{id:string})=>r.id)));
+  };
   if(action==='createClub'){
    if(user.role!=='ADMIN')throw new AppError('Only administrators can create clubs.',403);
    const x=z.object({name:z.string().trim().min(2).max(80),description:z.string().max(500).optional(),academicYearId:z.string().uuid().nullish(),teacherIds:z.array(z.string().uuid()).max(50).default([]),studentIds:z.array(z.string().uuid()).max(2000).default([])}).parse(raw.data);
@@ -657,6 +725,7 @@ export async function POST(req:Request){try{
      for(let i=0;i<teacherIds.length;i++)await tx.insert(clubTeachers).values({organizationId:oid,clubId:c.id,teacherId:teacherIds[i],role:i===0?'LEAD':'MEMBER'});
      const studentIds=[...new Set(x.studentIds)];
      for(const id of studentIds)await tx.insert(clubMembers).values({organizationId:oid,clubId:c.id,studentId:id});
+     await leaveOtherClubs(tx,c.id,studentIds);
     return c;
    });
    await audit(oid,user.id,'CLUB_CREATED','club',club.id,{name:club.name});
@@ -676,7 +745,7 @@ export async function POST(req:Request){try{
      // D1 cannot roll back: write the wanted links first (upserting existing ones), then drop only
      // the ones no longer wanted, so a mid-way failure never empties the club.
      if(x.teacherIds){const wanted=[...new Set(x.teacherIds)];for(let i=0;i<wanted.length;i++)await tx.insert(clubTeachers).values({organizationId:oid,clubId:x.id,teacherId:wanted[i],role:i===0?'LEAD':'MEMBER'}).onConflictDoUpdate({target:[clubTeachers.clubId,clubTeachers.teacherId],set:{role:i===0?'LEAD':'MEMBER'}});const keep=new Set(wanted);const current=await tx.select({teacherId:clubTeachers.teacherId}).from(clubTeachers).where(eq(clubTeachers.clubId,x.id));const stale=current.map((r:{teacherId:string})=>r.teacherId).filter((id:string)=>!keep.has(id));if(stale.length)await tx.delete(clubTeachers).where(and(eq(clubTeachers.clubId,x.id),inArray(clubTeachers.teacherId,stale)));}
-     if(x.studentIds){const wanted=[...new Set(x.studentIds)];for(const id of wanted)await tx.insert(clubMembers).values({organizationId:oid,clubId:x.id,studentId:id}).onConflictDoNothing();const keep=new Set(wanted);const current=await tx.select({studentId:clubMembers.studentId}).from(clubMembers).where(eq(clubMembers.clubId,x.id));const stale=current.map((r:{studentId:string})=>r.studentId).filter((id:string)=>!keep.has(id));if(stale.length)await tx.delete(clubMembers).where(and(eq(clubMembers.clubId,x.id),inArray(clubMembers.studentId,stale)));}
+     if(x.studentIds){const wanted=[...new Set(x.studentIds)];for(const id of wanted)await tx.insert(clubMembers).values({organizationId:oid,clubId:x.id,studentId:id}).onConflictDoNothing();await leaveOtherClubs(tx,x.id,wanted);const keep=new Set(wanted);const current=await tx.select({studentId:clubMembers.studentId}).from(clubMembers).where(eq(clubMembers.clubId,x.id));const stale=current.map((r:{studentId:string})=>r.studentId).filter((id:string)=>!keep.has(id));if(stale.length)await tx.delete(clubMembers).where(and(eq(clubMembers.clubId,x.id),inArray(clubMembers.studentId,stale)));}
    });
    await audit(oid,user.id,'CLUB_UPDATED','club',x.id,{name:x.name,active:x.active});
    return Response.json({ok:true});
@@ -690,6 +759,7 @@ export async function POST(req:Request){try{
    await runTransaction(async tx=>{
     // Insert the wanted members first, then drop only the ones that left — never empty the club first.
     for(const id of ids)await tx.insert(clubMembers).values({organizationId:oid,clubId:club.id,studentId:id}).onConflictDoNothing();
+    await leaveOtherClubs(tx,club.id,ids);
     const keep=new Set(ids);
     const current=await tx.select({studentId:clubMembers.studentId}).from(clubMembers).where(eq(clubMembers.clubId,club.id));
     const stale=current.map((r:{studentId:string})=>r.studentId).filter((id:string)=>!keep.has(id));
@@ -782,9 +852,19 @@ export async function POST(req:Request){try{
  if(user.role==='SUPER_ADMIN'){ 
   if(action==='organization'){
     const data=z.object({name:z.string().min(2),code:z.string().min(2).max(25),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),domain:z.string().max(200).optional().nullable(),logoUrl:logoUrlSchema.optional().nullable(),id:z.string().optional(),active:z.boolean().optional()}).parse(raw.data);
-   const [org]=data.id?await db.update(organizations).set({name:data.name,code:data.code.toUpperCase(),timezone:data.timezone,domain:data.domain||null,logoUrl:data.logoUrl||null,active:data.active??true,updatedAt:new Date()}).where(eq(organizations.id,data.id)).returning():await db.insert(organizations).values({name:data.name,code:data.code.toUpperCase(),timezone:data.timezone,domain:data.domain||null,logoUrl:data.logoUrl||null}).returning();
+   // The new school, its settings row and its 13 year levels are written together where the driver
+   // can roll back (local SQLite). D1 runs statements one after another and cannot undo the first,
+   // so the settings read on view=settings stays the backstop if a later insert ever fails.
+   const org=data.id
+    ? await db.update(organizations).set({name:data.name,code:data.code.toUpperCase(),timezone:data.timezone,domain:data.domain||null,logoUrl:data.logoUrl||null,active:data.active??true,updatedAt:new Date()}).where(eq(organizations.id,data.id)).returning()
+    : await runTransaction(async tx=>{
+       const [created]=await tx.insert(organizations).values({name:data.name,code:data.code.toUpperCase(),timezone:data.timezone,domain:data.domain||null,logoUrl:data.logoUrl||null}).returning();
+       if(!created)throw new AppError('The organization could not be created.',500);
+       await tx.insert(settings).values({organizationId:created.id});
+       await tx.insert(grades).values(Array.from({length:13},(_,i)=>({organizationId:created.id,name:`Year ${i+1}`,orderIndex:i+1})));
+       return created;
+      });
    if(!org) throw new AppError('Organization not found.',404);
-   if(!data.id){await db.insert(settings).values({organizationId:org.id}); await db.insert(grades).values(Array.from({length:13},(_,i)=>({organizationId:org.id,name:`Year ${i+1}`,orderIndex:i+1})));}
    await audit(null,user.id,data.id?'ORGANIZATION_UPDATED':'ORGANIZATION_CREATED','organization',org.id);return Response.json({ok:true});
   }
    if(action==='updateAdmin'){
@@ -806,8 +886,12 @@ export async function POST(req:Request){try{
    if(!org?.primaryAdminUserId)throw new AppError('Organization administrator not found.',404);
    const [admin]=await db.select({id:users.id}).from(users).where(and(eq(users.id,org.primaryAdminUserId),eq(users.organizationId,org.id),eq(users.role,'ADMIN')));
    if(!admin)throw new AppError('Administrator not found.',404);
-   await db.update(users).set({passwordHash:await hash(x.password,8),active:true,updatedAt:new Date()}).where(eq(users.id,admin.id));
-   await db.delete(sessions).where(eq(sessions.userId,admin.id));
+   // Password swap and session revocation must land together: a failure between them would
+   // change the password while leaving any compromised session valid for up to seven days.
+   await runTransaction(async tx=>{
+    await tx.update(users).set({passwordHash:await hash(x.password,8),active:true,updatedAt:new Date()}).where(eq(users.id,admin.id));
+    await tx.delete(sessions).where(eq(sessions.userId,admin.id));
+   });
    await audit(null,user.id,'ADMIN_ACCESS_RESET','user',admin.id,{organizationId:org.id});return Response.json({ok:true});
   }
   if(action==='admin'){
@@ -905,7 +989,11 @@ export async function POST(req:Request){try{
    if(action==='import'){
    const input=z.object({kind:z.enum(['students','teachers','assignments']),rows:z.array(z.record(z.string(),z.unknown())).min(1).max(1000)}).parse(raw.data);
    const [loadedClasses,loadedGrades,loadedYears,loadedSubjects,allTeachers,loadedAssignments]=await Promise.all([db.select().from(classes).where(eq(classes.organizationId,oid)),db.select().from(grades).where(eq(grades.organizationId,oid)),db.select().from(academicYears).where(eq(academicYears.organizationId,oid)),db.select().from(subjects).where(eq(subjects.organizationId,oid)),db.select().from(teachers).where(eq(teachers.organizationId,oid)),db.select().from(assignments).where(eq(assignments.organizationId,oid))]);
-   const allClasses=[...loadedClasses],allGrades=[...loadedGrades],allYears=[...loadedYears],allSubjects=[...loadedSubjects];
+    const allClasses=[...loadedClasses],allGrades=[...loadedGrades],allYears=[...loadedYears],allSubjects=[...loadedSubjects];
+    // Import dates must resolve against the school's own day, not UTC: a school east of UTC
+    // importing between local midnight and UTC midnight would attach students to the wrong year.
+    const [importOrg]=await db.select({timezone:organizations.timezone}).from(organizations).where(eq(organizations.id,oid)).limit(1);
+    const importTimezone=importOrg?.timezone||'UTC';
    const clean=(v:unknown)=>String(v??'').trim();const errors:{row:number;reason:string}[]=[];
    const credentials:{teacherId:string;name:string;email:string;username:string;password:string;emailProvided:boolean}[]=[];
    const created={grades:0,classes:0,subjects:0,years:0};let imported=0,updated=0,assignmentsCreated=0,assignmentsUpdated=0;
@@ -916,7 +1004,7 @@ export async function POST(req:Request){try{
      // Codes already taken in this school: a blank Student ID in the sheet continues this sequence.
      const studentCodes=(await db.select({v:students.studentId}).from(students).where(eq(students.organizationId,oid))).map(r=>r.v);
      const teacherCodes=(await db.select({v:teachers.teacherId}).from(teachers).where(eq(teachers.organizationId,oid))).map(r=>r.v);
-    const activeYear=()=>{const today=new Date().toISOString().slice(0,10);const active=allYears.filter(y=>y.active);const running=active.find(y=>(!y.startDate||y.startDate<=today)&&(!y.endDate||y.endDate>=today));if(running)return running;const latest=[...active].sort((a,b)=>String(b.startDate||'').localeCompare(String(a.startDate||'')))[0];return latest||allYears[0];};
+    const activeYear=()=>{const today=schoolToday(importTimezone);const active=allYears.filter(y=>y.active);const running=active.find(y=>(!y.startDate||y.startDate<=today)&&(!y.endDate||y.endDate>=today));if(running)return running;const latest=[...active].sort((a,b)=>String(b.startDate||'').localeCompare(String(a.startDate||'')))[0];return latest||allYears[0];};
     const ensureYear=async(name:string)=>{const digits=(v:string)=>v.replace(/\D/g,'');const want=digits(name);const found=allYears.find(y=>y.name.toLowerCase()===name.toLowerCase())||(want.length===8?allYears.find(y=>digits(y.name)===want):undefined);if(found)return found;const m=/^(\d{4})\s*[-–—]\s*(\d{4})$/.exec(name);if(!m)throw Error('Academic year does not exist in this school.');const [year]=await db.insert(academicYears).values({organizationId:oid,name:`${m[1]}-${m[2]}`,startDate:`${m[1]}-08-01`,endDate:`${m[2]}-07-31`,active:true}).returning();allYears.push(year);created.years++;return year;};
    const ensureGrade=async(name:string)=>{const found=allGrades.find(g=>g.name.toLowerCase()===name.toLowerCase());if(found)return found;const [grade]=await db.insert(grades).values({organizationId:oid,name,orderIndex:allGrades.length+1,active:true}).returning();allGrades.push(grade);created.grades++;return grade;};
    const ensureClass=async(name:string,gradeId:string,yearId:string)=>{const found=allClasses.find(c=>c.name.toLowerCase()===name.toLowerCase()&&c.academicYearId===yearId);if(found)return found;const [record]=await db.insert(classes).values({organizationId:oid,gradeId,academicYearId:yearId,name,active:true}).returning();allClasses.push(record);created.classes++;return record;};
@@ -1001,9 +1089,15 @@ export async function POST(req:Request){try{
    }else{
     const email=clean(row['Teacher Email']).toLowerCase(),className=clean(row['Class']),subjectName=clean(row['Subject']),yearName=clean(row['Academic Year']);const t=allTeachers.find(x=>x.email.toLowerCase()===email),y=allYears.find(x=>x.name===yearName),c=allClasses.find(x=>x.name.toLowerCase()===className.toLowerCase()&&x.academicYearId===y?.id),s=allSubjects.find(x=>x.name.toLowerCase()===subjectName.toLowerCase());if(!t||!y||!c||!s)throw Error('Teacher, class, subject or year not found in this organization.');const [old]=await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,t.id),eq(assignments.classId,c.id),eq(assignments.subjectId,s.id),eq(assignments.academicYearId,y.id)));const active=!['NO','FALSE','INACTIVE','0'].includes(clean(row['Active']).toUpperCase());if(old){await db.update(assignments).set({active,updatedAt:new Date()}).where(eq(assignments.id,old.id));updated++;}else{await db.insert(assignments).values({organizationId:oid,teacherId:t.id,classId:c.id,subjectId:s.id,academicYearId:y.id,active});imported++;}
    }
-  }catch(e){const message=e instanceof Error?e.message:'';const known=['Invalid student name or class.','Academic year does not exist in this school.','Create an academic year before importing students.','Create an academic year before importing teacher assignments.','Teacher row requires a name.','Invalid teacher name or email.','Teacher, class, subject or year not found in this organization.'];
+  }catch(e){
+   // Unknown failures (DB outage, schema drift) must leave a server-side trace, otherwise a
+   // production import failure is undiagnosable from the client-facing row error alone.
+   // Same spreadsheet row number the client is told (row 1 is the header, so data row i is i+2);
+   // naming a different line here sends the operator to the wrong row.
+   console.error('[api] import row failed',{row:i+2,kind:input.kind,error:e});
+   const message=e instanceof Error?e.message:'';const known=['Invalid student name or class.','Academic year does not exist in this school.','Create an academic year before importing students.','Create an academic year before importing teacher assignments.','Teacher row requires a name.','Invalid teacher name or email.','Teacher, class, subject or year not found in this organization.'];
    let reason=known.includes(message)?message:'Could not import this row. Check duplicate IDs, email addresses and values.';
-   if(/constraint failed/i.test(message))reason='A record with this student ID or email address already exists.';
+    if(/unique (constraint|index)/i.test(message))reason='A record with this student ID or email address already exists.';
    const label=input.kind==='students'?clean(input.rows[i]['Student ID'])||clean(input.rows[i]['Student Name']):clean(input.rows[i]['Teacher ID'])||clean(input.rows[i]['Teacher Name'])||clean(input.rows[i]['Teacher Email']);
    errors.push({row:i+2,reason:label?`${label} — ${reason}`:reason});}
    await audit(oid,user.id,'DATA_IMPORT',input.kind,undefined,{imported,updated,errors:errors.length,credentials:credentials.length,assignments:assignmentsCreated,created});
@@ -1060,27 +1154,46 @@ if(displaced.length){await db.update(assignments).set({active:false,updatedAt:ne
   }
   if(type==='class'){
     const x=z.object({name:z.string().min(1),active:z.boolean()}).parse(d);
+    const [current]=await db.select({academicYearId:classes.academicYearId}).from(classes).where(and(eq(classes.id,id),eq(classes.organizationId,oid))).limit(1);
+    if(!current)throw new AppError('Class not found.',404);
+    // A rename to an existing name must surface as a 409 like creation does, not a raw constraint
+    // error — and only against this class's own year: "7A" existing in two years is legal, because
+    // the unique index (and the create path above) are per school and academic year.
+    const [dupe]=await db.select({id:classes.id}).from(classes).where(and(eq(classes.organizationId,oid),eq(classes.academicYearId,current.academicYearId),eq(classes.name,x.name),sql`${classes.id}<>${id}`)).limit(1);
+    if(dupe)throw new AppError('A class with that name already exists in this academic year.',409);
     const [updated]=await db.update(classes).set({...x,updatedAt:new Date()}).where(and(eq(classes.id,id),eq(classes.organizationId,oid))).returning({id:classes.id});
     if(!updated)throw new AppError('Class not found.',404);
   }
   if(type==='subject'){
     const x=z.object({name:z.string().min(2),code:z.string().min(2),active:z.boolean()}).parse(d);
-    const [updated]=await db.update(subjects).set({...x,code:x.code.toUpperCase(),updatedAt:new Date()}).where(and(eq(subjects.id,id),eq(subjects.organizationId,oid))).returning({id:subjects.id});
+    const code=x.code.toUpperCase();
+    const [dupe]=await db.select({id:subjects.id}).from(subjects).where(and(eq(subjects.organizationId,oid),eq(subjects.code,code),sql`${subjects.id}<>${id}`)).limit(1);
+    if(dupe)throw new AppError('A subject with that code already exists.',409);
+    const [updated]=await db.update(subjects).set({...x,code,updatedAt:new Date()}).where(and(eq(subjects.id,id),eq(subjects.organizationId,oid))).returning({id:subjects.id});
     if(!updated)throw new AppError('Subject not found.',404);
   }
   if(type==='grade'){
     const x=z.object({name:z.string().min(2),orderIndex:z.coerce.number().int(),active:z.boolean()}).parse(d);
+    const [dupe]=await db.select({id:grades.id}).from(grades).where(and(eq(grades.organizationId,oid),eq(grades.name,x.name),sql`${grades.id}<>${id}`)).limit(1);
+    if(dupe)throw new AppError('A year level with that name already exists.',409);
     const [updated]=await db.update(grades).set(x).where(and(eq(grades.id,id),eq(grades.organizationId,oid))).returning({id:grades.id});
     if(!updated)throw new AppError('Year not found.',404);
   }
   if(type==='year'){
     const x=z.object({name:z.string().min(3),startDate:z.string(),endDate:z.string(),active:z.boolean()}).parse(d);
-    const [updated]=await db.update(academicYears).set(x).where(and(eq(academicYears.id,id),eq(academicYears.organizationId,oid))).returning({id:academicYears.id});
+    // Same date validation as creation: malformed dates would break month-overlap checks school-wide.
+    const startDate=parseDateKey(x.startDate,'Start date'),endDate=parseDateKey(x.endDate,'End date');
+    if(startDate>endDate)throw new AppError('The start date must not be after the end date.',400);
+    const [dupe]=await db.select({id:academicYears.id}).from(academicYears).where(and(eq(academicYears.organizationId,oid),eq(academicYears.name,x.name),sql`${academicYears.id}<>${id}`)).limit(1);
+    if(dupe)throw new AppError('An academic year with that name already exists.',409);
+    const [updated]=await db.update(academicYears).set({...x,startDate,endDate}).where(and(eq(academicYears.id,id),eq(academicYears.organizationId,oid))).returning({id:academicYears.id});
     if(!updated)throw new AppError('Academic year not found.',404);
   }
   if(type==='term'){
     const x=z.object({name:z.string().min(2),startDate:z.string(),endDate:z.string(),active:z.boolean()}).parse(d);
-    const [updated]=await db.update(terms).set(x).where(and(eq(terms.id,id),eq(terms.organizationId,oid))).returning({id:terms.id});
+    const startDate=parseDateKey(x.startDate,'Start date'),endDate=parseDateKey(x.endDate,'End date');
+    if(startDate>endDate)throw new AppError('The start date must not be after the end date.',400);
+    const [updated]=await db.update(terms).set({...x,startDate,endDate}).where(and(eq(terms.id,id),eq(terms.organizationId,oid))).returning({id:terms.id});
     if(!updated)throw new AppError('Term not found.',404);
   }
   if(type==='assignment'){
@@ -1093,12 +1206,14 @@ if(displaced.length){await db.update(assignments).set({active:false,updatedAt:ne
     const tupleChanged=next.teacherId!==current.teacherId||next.classId!==current.classId||next.subjectId!==current.subjectId||next.academicYearId!==current.academicYearId;
     if(tupleChanged){
       const [oldHolder]=await db.select({name:teachers.name}).from(teachers).where(eq(teachers.id,current.teacherId)).limit(1);
-      await db.update(assignments).set({active:false,updatedAt:new Date()}).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
-      if(current.active&&oldHolder&&current.teacherId!==next.teacherId)reassignedFrom.push(oldHolder.name);
-      await audit(oid,user.id,'ASSIGNMENT_DEACTIVATED','assignment',id,{reassignedTo:t.name});
       const [existing]=await db.select().from(assignments).where(and(eq(assignments.organizationId,oid),eq(assignments.teacherId,next.teacherId),eq(assignments.classId,next.classId),eq(assignments.subjectId,next.subjectId),eq(assignments.academicYearId,next.academicYearId)));
+      // Reactivate/insert the replacement first, then retire the old row. Deactivating first
+      // would leave the class with no active assignment if the replacement write failed.
       if(existing){await db.update(assignments).set({active:next.active,updatedAt:new Date()}).where(eq(assignments.id,existing.id));}
       else{await db.insert(assignments).values({organizationId:oid,teacherId:next.teacherId,classId:next.classId,subjectId:next.subjectId,academicYearId:next.academicYearId,active:next.active});}
+      if(current.active&&oldHolder&&current.teacherId!==next.teacherId)reassignedFrom.push(oldHolder.name);
+      await db.update(assignments).set({active:false,updatedAt:new Date()}).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
+      await audit(oid,user.id,'ASSIGNMENT_DEACTIVATED','assignment',id,{reassignedTo:t.name});
     }else{
       await db.update(assignments).set({active:next.active,updatedAt:new Date()}).where(and(eq(assignments.id,id),eq(assignments.organizationId,oid)));
     }
@@ -1158,11 +1273,15 @@ if(displaced.length){await db.update(assignments).set({active:false,updatedAt:ne
   }
   if(action==='settings'){
    const x=z.object({name:z.string().min(2).optional(),logoUrl:logoUrlSchema.optional().nullable(),timezone:z.string().refine(isValidTimezone,'Timezone must be a valid IANA zone such as Africa/Bujumbura.'),excellentThreshold:z.coerce.number().min(1).max(3),goodThreshold:z.coerce.number().min(1).max(3),homeworkUsuallyThreshold:z.coerce.number().min(0).max(1),punctualityOccasionallyMax:z.coerce.number().min(0).max(1)}).superRefine((v,c)=>{if(v.excellentThreshold<v.goodThreshold)c.addIssue({code:'custom',path:['excellentThreshold'],message:'The Excellent threshold must not be lower than the Good threshold.'});}).parse(raw.data);
-   await db.update(organizations).set({name:x.name||org.name,logoUrl:x.logoUrl!==undefined?x.logoUrl:org.logoUrl,timezone:x.timezone,updatedAt:new Date()}).where(eq(organizations.id,oid));
-   await db.insert(settings).values({organizationId:oid}).onConflictDoNothing();
-   const [cfg]=await db.select().from(settings).where(eq(settings.organizationId,oid));
-   if(!cfg)throw new AppError('Reporting settings are unavailable.');
-    await db.update(settings).set({excellentThreshold:x.excellentThreshold,goodThreshold:x.goodThreshold,homeworkUsuallyThreshold:x.homeworkUsuallyThreshold,punctualityOccasionallyMax:x.punctualityOccasionallyMax,version:cfg.version+1,updatedAt:new Date()}).where(eq(settings.organizationId,oid));
+   // All three writes land together, and the version increments in SQL so two concurrent admin
+   // saves cannot both read the same value and lose one increment.
+   await runTransaction(async tx=>{
+    await tx.update(organizations).set({name:x.name||org.name,logoUrl:x.logoUrl!==undefined?x.logoUrl:org.logoUrl,timezone:x.timezone,updatedAt:new Date()}).where(eq(organizations.id,oid));
+    await tx.insert(settings).values({organizationId:oid}).onConflictDoNothing();
+    const [cfg]=await tx.select().from(settings).where(eq(settings.organizationId,oid));
+    if(!cfg)throw new AppError('Reporting settings are unavailable.');
+    await tx.update(settings).set({excellentThreshold:x.excellentThreshold,goodThreshold:x.goodThreshold,homeworkUsuallyThreshold:x.homeworkUsuallyThreshold,punctualityOccasionallyMax:x.punctualityOccasionallyMax,version:sql`${settings.version}+1`,updatedAt:new Date()}).where(eq(settings.organizationId,oid));
+   });
    await audit(oid,user.id,'CONFIGURATION_CHANGED','settings',oid);
    return Response.json({ok:true});
   }

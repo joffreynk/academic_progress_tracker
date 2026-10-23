@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { X, Calendar, User, Clock, AlertTriangle, TrendingUp, CheckCircle, Award } from 'lucide-react';
 import type { MonthlyTrend } from '@/lib/reporting';
+import { punctualityLabels, type PunctualityKey } from '@/lib/monthly';
 
 interface TimelineRecord {
   lessonDate: string;
@@ -167,7 +168,7 @@ export default function StudentProfileModal({
                         <tr key={i}>
                           <td>{t.lessonDate}</td>
                           <td><strong>{t.subject}</strong></td>
-                          <td>{t.punctuality ? t.punctuality.replaceAll('_', ' ') : '—'}</td>
+                          <td>{t.punctuality ? (punctualityLabels[t.punctuality as PunctualityKey] ?? t.punctuality.replaceAll('_', ' ')) : '—'}</td>
                           <td>{t.performance ? t.performance.replace('_', ' ') : '—'}</td>
                           <td>{t.homework ? t.homework.replace('_', ' ') : '—'}</td>
                         </tr>
@@ -208,7 +209,7 @@ export default function StudentProfileModal({
                           <td style={{ maxWidth: 160 }}>{t.topic}</td>
                           <td>{t.performance ? t.performance.replace('_', ' ') : '—'}</td>
                           <td>{t.conduct ? t.conduct.replace('_', ' ') : '—'}</td>
-                          <td>{t.punctuality ? t.punctuality.replaceAll('_', ' ') : '—'}</td>
+                          <td>{t.punctuality ? (punctualityLabels[t.punctuality as PunctualityKey] ?? t.punctuality.replaceAll('_', ' ')) : '—'}</td>
                           <td>{t.participation || '—'}</td>
                           <td>{t.homework ? t.homework.replace('_', ' ') : '—'}</td>
                           <td style={{ fontSize: 12, color: '#4b5563' }}>{t.comment || '—'}</td>

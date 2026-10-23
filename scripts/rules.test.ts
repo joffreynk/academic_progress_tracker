@@ -263,9 +263,9 @@ test('§162: Late attendance counts as attended lesson and contributes to punctu
     comment: null,
   };
 
-  // 10 attended lessons, all rated on time -> Always On Time
+  // 10 attended lessons, all rated on time -> On Time
   const onTimeRows = Array.from({ length: 10 }, (_, i) => ({ ...base, lessonId: String(i) }));
-  assert.equal(summarize(onTimeRows, undefined).punctualityResult, 'Always On Time');
+  assert.equal(summarize(onTimeRows, undefined).punctualityResult, 'On Time');
 
   // 10 attended lessons, 1 rated occasionally late (10%) -> Occasionally Late (<= 10% threshold)
   const occasionallyLateRows = [...onTimeRows.slice(0, 9), { ...base, lessonId: '9', attendance: 'LATE', punctuality: 'OCCASIONALLY_LATE' }];
@@ -455,7 +455,7 @@ test('§155: Month with exactly one lesson aggregates without division by zero o
   assert.equal(summary.attendanceRate, 100);
   assert.equal(summary.performanceResult, 'EXCELLENT');
   assert.equal(summary.homeworkResult, 'Always Completed');
-  assert.equal(summary.punctualityResult, 'Always On Time');
+  assert.equal(summary.punctualityResult, 'On Time');
 
   // Single lesson where student was absent
   const singleAbsent: Observation = {
@@ -787,7 +787,7 @@ test('comparison: one subject row per month with criteria status, attendance and
   assert.deepEqual(maths.months.map((m) => m.performanceResult), ['NEEDS_IMPROVEMENT', 'GOOD', 'EXCELLENT']);
   assert.deepEqual(maths.months.map((m) => m.participationResult), ['PASSIVE', 'MODERATE', 'ACTIVE']);
   assert.deepEqual(maths.months.map((m) => m.attendanceRate), [100, 100, 0]);
-  assert.deepEqual(maths.months.map((m) => m.punctualityResult), ['Frequently Late', 'Frequently Late', 'Always On Time'], 'a single late lesson in September is still 100% late, so it is frequently late');
+  assert.deepEqual(maths.months.map((m) => m.punctualityResult), ['Frequently Late', 'Frequently Late', 'On Time'], 'a single late lesson in September is still 100% late, so it is frequently late');
   assert.deepEqual(maths.months.map((m) => m.homeworkResult), ['Rarely Completed', 'Always Completed', 'Always Completed'], 'one USUALLY_COMPLETED lesson is a 100% completion rate, so it resolves to Always Completed');
   assert.equal(maths.overall.lessons, 4, 'overall row still spans the whole period');
   assert.equal(maths.overall.attendanceRate, 75);
@@ -828,7 +828,7 @@ test('comparison: result trend ranks evaluation statuses so past months can be c
   assert.equal(resultTrend('ACTIVE', 'MODERATE'), 'up');
   assert.equal(resultTrend('PASSIVE', 'ACTIVE'), 'down');
   assert.equal(resultTrend('Always Completed', 'Usually Completed'), 'up');
-  assert.equal(resultTrend('Frequently Late', 'Always On Time'), 'down');
+  assert.equal(resultTrend('Frequently Late', 'On Time'), 'down');
   assert.equal(resultTrend('No data', 'GOOD'), 'flat', 'unranked statuses are not scored as a change');
 });
 
@@ -1062,9 +1062,9 @@ test('§192: summarizeClubs gives each child one short summary per club they bel
     { studentId: 's2', clubName: 'Robotics Club' },
   ];
   const records = [
-    { studentId: 's1', clubName: 'Robotics Club', activityId: 'a1', activityDate: '2026-09', title: 'Line-following robots', performance: 'GOOD', comment: 'Good teamwork' },
+    { studentId: 's1', clubName: 'Robotics Club', activityId: 'a1', activityDate: '2026-09', title: 'Line-following robots', performance: 'GOOD', comment: 'Good teamwork', punctuality: 'ALWAYS_ON_TIME', participation: 'ACTIVE', conduct: 'GOOD' },
     { studentId: 's1', clubName: 'Robotics Club', activityId: 'a2', activityDate: '2026-10', title: 'Debate practice', performance: 'NEEDS_IMPROVEMENT', comment: 'Needs to focus' },
-    { studentId: 's2', clubName: 'Robotics Club', activityId: 'a1', activityDate: '2026-09', title: 'Line-following robots', performance: 'EXCELLENT', comment: null },
+    { studentId: 's2', clubName: 'Robotics Club', activityId: 'a1', activityDate: '2026-09', title: 'Line-following robots', performance: 'EXCELLENT', comment: null, punctuality: 'OCCASIONALLY_LATE', participation: 'MODERATE', conduct: 'GOOD' },
     // A record for a club the child does not belong to must never surface.
     { studentId: 's2', clubName: 'Debate Club', activityId: 'a3', activityDate: '2026-09', title: 'Oratory', performance: 'GOOD', comment: 'ghost' },
   ];
@@ -1073,12 +1073,16 @@ test('§192: summarizeClubs gives each child one short summary per club they bel
   assert.equal(byPeriod.s1[0].activities, 0, 'a club with no activity in the period counts zero');
   assert.equal(byPeriod.s1[1].activities, 1, 'only activities inside the period month window are counted');
   assert.deepEqual(byPeriod.s1[1].months, ['2026-09']);
+  assert.deepEqual(byPeriod.s1[1].byMonth, [{ month: '2026-09', activities: 1, latest: { title: 'Line-following robots', performance: 'GOOD', comment: 'Good teamwork', punctuality: 'ALWAYS_ON_TIME', participation: 'ACTIVE', conduct: 'GOOD' } }], 'the club summary carries a per-month breakdown with the recorded ratings');
   assert.equal(byPeriod.s1[1].latest?.title, 'Line-following robots');
   assert.deepEqual(byPeriod.s2.map((c) => c.clubName), ['Robotics Club'], 'a record in a club the child does not join is dropped');
   assert.equal(byPeriod.s2[0].activities, 1);
   assert.equal(byPeriod.s2[0].latest?.comment, null, 'a missing comment stays null instead of being invented');
+  assert.deepEqual(byPeriod.s1[1].mix, { punctuality: { ALWAYS_ON_TIME: 1 }, performance: { GOOD: 1 }, participation: { ACTIVE: 1 }, conduct: { GOOD: 1 } }, 'the per-student summary carries the rating mix of its period records');
+  assert.deepEqual(byPeriod.s2[0].mix, { punctuality: { OCCASIONALLY_LATE: 1 }, performance: { EXCELLENT: 1 }, participation: { MODERATE: 1 }, conduct: { GOOD: 1 } });
 
   const allMonths = summarizeClubs(memberships, records, []);
   assert.equal(allMonths.s1.find((c) => c.clubName === 'Robotics Club')?.activities, 2, 'an empty month window counts every activity');
   assert.equal(allMonths.s1.find((c) => c.clubName === 'Robotics Club')?.latest?.title, 'Debate practice', 'the latest activity wins by month, not by insertion order');
+  assert.deepEqual(allMonths.s1.find((c) => c.clubName === 'Robotics Club')?.mix?.performance, { GOOD: 1, NEEDS_IMPROVEMENT: 1 }, 'the mix spans every month when the window is open');
 });

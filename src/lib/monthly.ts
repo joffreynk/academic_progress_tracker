@@ -8,29 +8,47 @@ export const homeworkLevels = ['ALWAYS_COMPLETED', 'USUALLY_COMPLETED', 'RARELY_
 export const conductLevels = ['EXCELLENT', 'GOOD', 'NEEDS_IMPROVEMENT'] as const;
 
 // §193 v3: attendance is gone from reports, so this one select carries the whole
-// attendance story — seven categories from always on time to always absent.
+// attendance story — five categories from on-time to absent. Only the always-vs-usually
+// on-time pair and occasional absence were dropped; absence itself stays two-fold
+// (often absent = regular absences, absent = every session missed).
 export const punctualityLevels = [
   'ALWAYS_ON_TIME',
-  'USUALLY_ON_TIME',
   'OCCASIONALLY_LATE',
   'FREQUENTLY_LATE',
-  'OCCASIONALLY_ABSENT',
   'FREQUENTLY_ABSENT',
   'ALWAYS_ABSENT',
 ] as const;
 export type Punctuality = (typeof punctualityLevels)[number];
-export const punctualityLabels: Record<Punctuality, string> = {
-  ALWAYS_ON_TIME: 'Always On Time',
-  USUALLY_ON_TIME: 'Usually On Time',
+/** Pre-5-option categories still stored on old rows — never offered, always scored and labeled. */
+export const LEGACY_PUNCTUALITY_LEVELS = ['USUALLY_ON_TIME', 'OCCASIONALLY_ABSENT'] as const;
+export type PunctualityKey = Punctuality | (typeof LEGACY_PUNCTUALITY_LEVELS)[number];
+export const punctualityLabels: Record<PunctualityKey, string> = {
+  ALWAYS_ON_TIME: 'On Time',
+  USUALLY_ON_TIME: 'On Time',
   OCCASIONALLY_LATE: 'Occasionally Late',
   FREQUENTLY_LATE: 'Frequently Late',
-  OCCASIONALLY_ABSENT: 'Occasionally Absent',
-  FREQUENTLY_ABSENT: 'Frequently Absent',
-  ALWAYS_ABSENT: 'Always Absent',
+  OCCASIONALLY_ABSENT: 'Often Absent',
+  FREQUENTLY_ABSENT: 'Often Absent',
+  ALWAYS_ABSENT: 'Absent',
 };
+/** Retired keys fold into their nearest current category so every surface shows the same five labels. */
+const PUNCTUALITY_FOLD: Record<string, Punctuality> = {
+  USUALLY_ON_TIME: 'ALWAYS_ON_TIME',
+  OCCASIONALLY_ABSENT: 'FREQUENTLY_ABSENT',
+};
+/** Merge retired categories into the current five — dropdowns, reports, stats and PDFs all read the same scale. */
+export function foldPunctualityTally(counts: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [key, count] of Object.entries(counts)) {
+    if (!count) continue;
+    const target = PUNCTUALITY_FOLD[key] ?? key;
+    out[target] = (out[target] || 0) + count;
+  }
+  return out;
+}
 
 /** Ordinal weight per category; the rounded mean of these names an aggregate result. */
-export const PUNCTUALITY_SCORE: Record<Punctuality, number> = {
+export const PUNCTUALITY_SCORE: Record<PunctualityKey, number> = {
   ALWAYS_ON_TIME: 3,
   USUALLY_ON_TIME: 2,
   OCCASIONALLY_LATE: 1,
@@ -39,8 +57,17 @@ export const PUNCTUALITY_SCORE: Record<Punctuality, number> = {
   FREQUENTLY_ABSENT: -2,
   ALWAYS_ABSENT: -3,
 };
+/** Select options for a dropdown: the current five plus a legacy value still stored on the row. */
+export function punctualityOptionsFor(value?: string | null): [string, string][] {
+  const options: [string, string][] = punctualityLevels.map((k) => [k, punctualityLabels[k]]);
+  if (value && !punctualityLevels.includes(value as Punctuality)) {
+    const baseLabel = punctualityLabels[value as PunctualityKey] ?? value.replaceAll('_', ' ');
+    options.push([value, `${baseLabel} (previous)`]);
+  }
+  return options;
+}
 const SCORE_LABEL = Object.fromEntries(
-  Object.entries(PUNCTUALITY_SCORE).map(([k, v]) => [v, punctualityLabels[k as Punctuality]]),
+  Object.entries(PUNCTUALITY_SCORE).map(([k, v]) => [v, punctualityLabels[k as PunctualityKey]]),
 ) as Record<number, string>;
 
 /**
@@ -54,7 +81,7 @@ export function punctualityResultFromTally(counts: Record<string, number>): stri
   let total = 0;
   let sum = 0;
   for (const [key, count] of Object.entries(counts)) {
-    const score = PUNCTUALITY_SCORE[key as Punctuality];
+    const score = PUNCTUALITY_SCORE[key as PunctualityKey];
     if (score === undefined || !count) continue;
     total += count;
     sum += score * count;
@@ -66,11 +93,15 @@ export function punctualityResultFromTally(counts: Record<string, number>): stri
 const level = <T extends readonly [string, ...string[]]>(values: T) =>
   z.enum(values as unknown as [string, ...string[]]).nullable().optional();
 
+// Teachers pick from the five, but validation accepts the legacy keys too so an
+// old draft can be re-saved without losing its category.
+const punctualityInputLevels = [...punctualityLevels, ...LEGACY_PUNCTUALITY_LEVELS] as const;
+
 // Present percentages are gone: the teacher picks one punctuality category
 // and the session counts for reports are derived from it server-side.
 export const monthlyStudentInput = z.object({
   studentId: z.string(),
-  punctuality: z.enum(punctualityLevels).nullable().optional(),
+  punctuality: level(punctualityInputLevels),
   performance: level(performanceLevels),
   participation: level(participationLevels),
   homework: level(homeworkLevels),
@@ -106,7 +137,7 @@ export function derivePunctuality(present: number, late: number, rules: Rules): 
   const attended = present + late;
   if (!attended) return 'No data';
   const rate = late / attended;
-  if (rate === 0) return 'Always On Time';
+  if (rate === 0) return punctualityLabels.ALWAYS_ON_TIME;
   return rate <= (rules?.punctualityOccasionallyMax ?? 0.1) ? 'Occasionally Late' : 'Frequently Late';
 }
 

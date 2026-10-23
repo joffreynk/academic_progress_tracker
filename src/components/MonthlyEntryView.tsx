@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, Save, Send, Search, Trash2, Users, Wand2, X, AlertTriangle } from 'lucide-react';
 import type { ModalConfig } from '@/components/Modal';
 import { buildNormalRecordDefaults } from '@/lib/reporting';
-import { punctualityLabels, punctualityLevels, performanceLevels, participationLevels, homeworkLevels, conductLevels } from '@/lib/monthly';
+import { punctualityOptionsFor, performanceLevels, participationLevels, homeworkLevels, conductLevels } from '@/lib/monthly';
 import { monthLabel } from '@/lib/period';
 
 type RosterStudent = { studentId: string; studentCode: string; studentName: string };
@@ -34,8 +34,8 @@ const STATUS_LABEL: Record<string, string> = {
   DRAFT: 'Draft', SUBMITTED: 'Submitted', UNDER_REVIEW: 'Under review', APPROVED: 'Approved', RETURNED: 'Returned', MISSING: 'Not started',
 };
 
-// §193 v3: one punctuality select per student — seven categories carry the whole attendance story.
-const PUNCTUALITY_OPTIONS = punctualityLevels.map((k) => [k, punctualityLabels[k]] as const);
+// §193 v3: one punctuality select per student — five categories carry the whole
+// attendance story; punctualityOptionsFor keeps a legacy value selectable on old rows.
 
 const LEVEL_OPTIONS: Record<'performance' | 'participation' | 'homework' | 'conduct', readonly string[]> = {
   performance: performanceLevels,
@@ -619,7 +619,7 @@ export default function MonthlyEntryView({
                           onChange={(e) => setCell(s.studentId, { punctuality: e.target.value || null })}
                         >
                           <option value="">— Choose —</option>
-                          {PUNCTUALITY_OPTIONS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                          {punctualityOptionsFor(r.punctuality).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
                         </select>
                       </td>
                       <td>

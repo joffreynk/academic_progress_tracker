@@ -103,9 +103,12 @@ test('pdf: student follow-up fits one page with all summary data', async () => {
   assert.ok(text.includes('Science'), 'every subject must appear');
   assert.ok(/Academic performance/i.test(text), 'section 1 must be present');
   assert.ok(text.includes('PUNCTUALITY'), 'the KPI strip must carry the punctuality box');
+  assert.ok(text.includes('PARTICIPATION'), 'the KPI strip must carry the participation box');
+  assert.ok(text.includes('Often Absent 0%'), 'categories with no observations must still print at 0%');
   assert.ok(!text.includes('ATTENDANCE'), 'attendance must be gone from the student report');
   assert.ok(!text.includes('ATT. %'), 'the subject table must not carry an attendance column');
-  assert.ok(/Punctuality & discipline/i.test(text), 'section 2 must be the punctuality and discipline block');
+  assert.ok(!/Punctuality & discipline/i.test(text), 'the punctuality and discipline facts block must be gone');
+  assert.ok(/RECORDED \d+ lesson reports? in the period/i.test(text), 'the recorded lesson count must sit above the KPI cards');
   assert.ok(/Month over month/i.test(text), 'the month-over-month comparison must be present');
   assert.ok(text.includes('All subjects combined'), 'the combined comparison must be present');
   assert.ok(/Teacher comments/i.test(text), 'the teacher comments section must be present');
@@ -180,15 +183,110 @@ test('pdf: KPI counts stay whole and one comment per subject is listed', async (
   assert.equal(doc.getNumberOfPages(), 1, `the report must stay a single page, got ${doc.getNumberOfPages()}`);
   const text = pdfStrings(buf);
   assert.ok(
-    text.includes('Always On Time 64%, Occasionally Late 18%, Frequently Late 6%, Occasionally Absent 6%, Frequently Absent 6%'),
-    'the punctuality KPI must print every rating as a share of the whole instead of an ellipsis',
+    text.includes('On Time 64%; Occasionally Late 18%; Frequently Late 6%; Often Absent 12%; Absent 0%'),
+    'the punctuality KPI must print the full five-category scale, one category per semicolon-separated line',
   );
   assert.ok(!/[\u0085\u2026]/.test(text), 'no cell in the report may end with an ellipsis');
   assert.ok(!text.includes('Needs improvement observation'), 'no default comment may be invented for a flagged row');
-  const comments = text.slice(text.indexOf('3. TEACHER COMMENTS'), text.indexOf('4. RECENT ACTIVITY'));
+  const comments = text.slice(text.indexOf('2. TEACHER COMMENTS'), text.indexOf('3. RECENT ACTIVITY'));
   assert.equal(comments.split('needs improvement on performance').length - 1, 1, 'Mathematics lists its written comment exactly once');
   assert.equal(comments.split('Needs to focus in class').length - 1, 1, 'Physics lists its single general comment exactly once');
   assert.ok(text.includes('Basita Mohammed') && text.includes('Alsen Atuhura'), 'teacher names must print in full');
+});
+
+test('pdf: KPI cards keep two-digit share lines on one line without ellipsis', async () => {
+  const period = buildPeriod('2026-09-01', '2026-09-30');
+  assert.ok(period, 'fixture period must parse');
+  // 40/30/30 punctuality and 50/50 performance: every share line is two-digit, and
+  // "Occasionally Late 30%;" is the widest string a card can receive.
+  const punctualityCycle = [
+    ...Array(6).fill('ALWAYS_ON_TIME'), ...Array(6).fill('OCCASIONALLY_LATE'),
+    ...Array(5).fill('FREQUENTLY_ABSENT'), ...Array(3).fill('OCCASIONALLY_ABSENT'),
+  ];
+  const rows: Observation[] = punctualityCycle.map((punctuality, i) => ({
+    lessonId: `width-${i}`,
+    lessonDate: '2026-09-15',
+    topic: 'Fractions',
+    status: 'APPROVED',
+    studentId: 's1',
+    studentName: 'Aaira Irshad Sheikh',
+    studentCode: 'STU-050',
+    className: '6A',
+    subjectName: 'Mathematics',
+    teacherName: 'Basita Mohammed',
+    attendance: 'PRESENT',
+    performance: i < 10 ? 'NEEDS_IMPROVEMENT' : 'GOOD',
+    conduct: 'GOOD',
+    punctuality,
+    homework: 'ALWAYS_COMPLETED',
+    participation: 'MODERATE',
+    comment: null,
+  }));
+
+  const { doc } = await buildStudentPdf({
+    school: 'International Maarif Schools',
+    period,
+    student: { id: 's1', name: 'Aaira Irshad Sheikh', code: 'STU-050', className: '6A' },
+    subjects: groupReports(rows, RULES),
+    overall: summarize(rows, RULES),
+    raw: rows,
+    rules: RULES,
+  });
+
+  const text = pdfStrings(Buffer.from(doc.output('arraybuffer') as ArrayBuffer));
+  assert.ok(!/[\u0085\u2026]/.test(text), 'no KPI card may ellipsize a share line');
+  assert.ok(text.includes('Occasionally Late 30%'), 'the widest punctuality share must print in full');
+  assert.ok(text.includes('Needs Improvement 50%'), 'two-digit performance shares must print in full');
+  assert.ok(text.includes('Often Absent 40%') && text.includes('Occasionally Late 30%'), 'every punctuality category must print');
+  assert.ok(text.includes('Passive 0%') && text.includes('Active 0%'), 'unused categories of the participation scale must print at 0%');
+});
+
+test('pdf: KPI cards print exactly the five punctuality labels, folding retired categories', async () => {
+  const period = buildPeriod('2026-09-01', '2026-09-30');
+  assert.ok(period, 'fixture period must parse');
+  // The five current categories plus the two retired keys still stored on old rows,
+  // 4 sessions each = 28 observations; the retired keys fold into their current neighbours.
+  const cycle = ['ALWAYS_ON_TIME', 'USUALLY_ON_TIME', 'OCCASIONALLY_LATE', 'FREQUENTLY_LATE', 'OCCASIONALLY_ABSENT', 'FREQUENTLY_ABSENT', 'ALWAYS_ABSENT'];
+  const rows: Observation[] = Array.from({ length: 28 }, (_, i) => ({
+    lessonId: `seven-${i}`,
+    lessonDate: '2026-09-15',
+    topic: 'Fractions',
+    status: 'APPROVED',
+    studentId: 's1',
+    studentName: 'Aaira Irshad Sheikh',
+    studentCode: 'STU-050',
+    className: '6A',
+    subjectName: 'Mathematics',
+    teacherName: 'Basita Mohammed',
+    attendance: i % 7 === 6 ? 'ABSENT' : 'PRESENT',
+    performance: 'GOOD',
+    conduct: 'GOOD',
+    punctuality: cycle[i % 7],
+    homework: 'ALWAYS_COMPLETED',
+    participation: 'ACTIVE',
+    comment: null,
+  }));
+
+  const { doc } = await buildStudentPdf({
+    school: 'International Maarif Schools',
+    period,
+    student: { id: 's1', name: 'Aaira Irshad Sheikh', code: 'STU-050', className: '6A' },
+    subjects: groupReports(rows, RULES),
+    overall: summarize(rows, RULES),
+    raw: rows,
+    rules: RULES,
+  });
+
+  const text = pdfStrings(Buffer.from(doc.output('arraybuffer') as ArrayBuffer));
+  assert.ok(!/[…]/.test(text), 'no KPI card may ellipsize a share line');
+  for (const share of ['On Time 29%', 'Occasionally Late 14%', 'Frequently Late 14%', 'Often Absent 29%', 'Absent 14%']) {
+    assert.ok(text.includes(share), `the punctuality card must print "${share}" in full`);
+  }
+  assert.ok(!text.includes('Usually On Time') && !text.includes('Some Absences'), 'no retired label may appear anywhere in the report');
+  assert.ok(
+    (text.match(/On Time \d+%/g) || []).length === 1 && (text.match(/Often Absent \d+%/g) || []).length === 1,
+    'the card carries each of the five labels exactly once',
+  );
 });
 
 test('pdf: per-subject month tables render when space allows', async () => {
@@ -263,6 +361,13 @@ test('pdf: class summary covers every student-subject row and lists every month'
     summaries,
     comparison: groupReportsByMonth(rows, RULES),
     rules: RULES,
+    clubs: {
+      s1: [
+        { clubName: 'Robotics Club', activities: 3, months: ['2026-09'], byMonth: [{ month: '2026-09', activities: 3, latest: { title: 'Community demo day', performance: 'GOOD', comment: null } }], latest: { title: 'Community demo day', month: '2026-09', performance: 'GOOD', comment: null },
+          mix: { punctuality: { ALWAYS_ON_TIME: 2, FREQUENTLY_LATE: 1 }, performance: { GOOD: 2, EXCELLENT: 1 }, participation: { ACTIVE: 3 }, conduct: { GOOD: 3 } } },
+        { clubName: 'Debate Society', activities: 0, months: [], byMonth: [], latest: null, mix: { punctuality: {}, performance: {}, participation: {}, conduct: {} } },
+      ],
+    },
   });
 
   const buf = Buffer.from(doc.output('arraybuffer') as ArrayBuffer);
@@ -281,6 +386,12 @@ test('pdf: class summary covers every student-subject row and lists every month'
   assert.ok(text.includes('Jun'), 'a month with no recorded lessons must still be listed rather than dropped');
   assert.ok(text.includes('Closed'), 'closed months must be flagged');
   assert.ok(text.includes('MONTHLY CLASS ACADEMIC PROGRESS REPORT'), 'the class summary must carry the new monthly progress heading');
+  assert.ok(text.includes('Clubs & activities') || text.includes('CLUBS'), 'the class summary must carry a clubs section');
+  assert.ok(text.includes('Robotics Club') && text.includes('Debate Society'), 'every club the cohort belongs to must be listed');
+  assert.ok(text.includes('Community demo day'), 'club activity details must appear in the class summary');
+  assert.ok(text.includes('On Time 67%') && text.includes('Frequently Late 33%'), 'the club row must carry the punctuality mix of its records');
+  assert.ok(text.includes('Good 67%') && text.includes('Excellent 33%'), 'the club row must carry the performance mix of its records');
+  assert.ok(text.includes('Active 100%'), 'the club row must carry the participation mix of its records');
 });
 
 test('pdf: class reports ZIP packs one valid PDF per student', async () => {
@@ -378,7 +489,7 @@ test('pdf: club report cards pair the headline result with the subject mix', asy
   }
   assert.ok(text.includes('Needs Improvement 50%'), 'the performance card must show the 50% share');
   assert.ok(text.includes('Good 30%') && text.includes('Excellent 20%'), 'every performance share must be listed');
-  assert.ok(text.includes('Always On Time 90%'), 'the punctuality card must show its share');
+  assert.ok(text.includes('On Time 90%'), 'the punctuality card must show its share with the current label');
   assert.ok(text.includes('Academic year 2026-2027'), 'the identity strip must name the profile window');
   assert.ok(text.includes('Needs Improvement'), 'the headline result must sit above the mix');
   assert.ok(text.includes('ACADEMIC PROFILE'), 'the strip labels the academic profile window');
@@ -398,8 +509,9 @@ test('pdf: student follow-up carries the clubs the child belongs to', async () =
     raw: rows,
     rules: RULES,
     clubs: [
-      { clubName: 'Robotics Club', activities: 2, months: ['2026-09'], latest: { title: 'Line-following robots', month: '2026-09', performance: 'GOOD', comment: 'Good teamwork' } },
-      { clubName: 'Debate Club', activities: 0, months: [], latest: null },
+      { clubName: 'Robotics Club', activities: 2, months: ['2026-09'], byMonth: [{ month: '2026-09', activities: 2, latest: { title: 'Line-following robots', performance: 'GOOD', comment: 'Good teamwork', punctuality: 'ALWAYS_ON_TIME', participation: 'ACTIVE', conduct: 'GOOD' } }], latest: { title: 'Line-following robots', month: '2026-09', performance: 'GOOD', comment: 'Good teamwork' },
+        mix: { punctuality: { ALWAYS_ON_TIME: 2 }, performance: { GOOD: 2 }, participation: { ACTIVE: 2 }, conduct: { GOOD: 2 } } },
+      { clubName: 'Debate Club', activities: 0, months: [], byMonth: [], latest: null, mix: { punctuality: {}, performance: {}, participation: {}, conduct: {} } },
     ],
   });
 
@@ -407,9 +519,10 @@ test('pdf: student follow-up carries the clubs the child belongs to', async () =
   const text = pdfStrings(buf);
   assert.equal(doc.getNumberOfPages(), 1, `the report must stay a single page, got ${doc.getNumberOfPages()}`);
   assert.ok(/Clubs & activities/i.test(text), 'the clubs section must be present');
-  // The em dash decodes as \u0097 in WinAnsi, so assert on the club name and the summary separately.
-  assert.ok(text.includes('Robotics Club') && text.includes('2 activities'), 'a club with activities must print its short record summary');
-  assert.ok(text.includes('September 2026') && text.includes('Good teamwork'), 'the summary must name the month and the latest comment');
+  // The em dash decodes as A~ in WinAnsi, so assert on the club name and the summary separately.
+  assert.ok(/Robotics Club[\s\S]{0,80}\b2\b/.test(text), 'a club with activities must print its short record summary');
+  assert.ok(text.includes('Line-following robots') && text.includes('Good teamwork'), 'the latest activity title and comment must print');
+  assert.ok(text.includes('On Time') && text.includes('Active'), 'the club row must carry the recorded punctuality and participation ratings');
   assert.ok(text.includes('Debate Club') && text.includes('Member'), 'a club with no activities must still appear as a membership');
   assert.ok(text.includes('Class teacher signature'), 'the signature block must survive the clubs section');
   assert.ok(text.includes('Page 1 of 1'), 'the footer must show the page count');
@@ -438,7 +551,7 @@ test('pdf: class reports ZIP carries each child\'s clubs into their own PDF', as
     data: rows,
     rules: RULES,
     clubs: {
-      s1: [{ clubName: 'Robotics Club', activities: 1, months: ['2026-09'], latest: { title: 'Line-following robots', month: '2026-09', performance: 'GOOD', comment: 'Good teamwork' } }],
+      s1: [{ clubName: 'Robotics Club', activities: 1, months: ['2026-09'], byMonth: [{ month: '2026-09', activities: 1, latest: { title: 'Line-following robots', performance: 'GOOD', comment: 'Good teamwork' } }], latest: { title: 'Line-following robots', month: '2026-09', performance: 'GOOD', comment: 'Good teamwork' } }],
       s2: [],
     },
   });
@@ -451,7 +564,7 @@ test('pdf: class reports ZIP carries each child\'s clubs into their own PDF', as
   for (const name of files) {
     const text = pdfStrings(await zip.files[name].async('nodebuffer'));
     if (name.includes('Grace_Mugisha')) {
-      assert.ok(text.includes('Robotics Club') && text.includes('1 activity'), `the ZIP member for Grace must carry her clubs, got: ${name}`);
+      assert.ok(text.includes('Robotics Club') && text.includes('ACTIV.'), `the ZIP member for Grace must carry her clubs, got: ${name}`);
       sawClubs += 1;
     } else {
       assert.ok(!/Clubs & activities/i.test(text), `a child with no clubs must not get a clubs section, got: ${name}`);

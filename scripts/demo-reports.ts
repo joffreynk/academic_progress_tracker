@@ -80,8 +80,9 @@ async function main() {
     subjects, overall, comparable: groupReportsByMonth(studentRows, RULES), overallMonths: summarizeByMonth(studentRows, RULES),
     raw: studentRows, rules: RULES,
     clubs: [
-      { clubName: 'Robotics Club', activities: 3, months: ['2026-10'], latest: { title: 'Community demo day', month: '2026-10', performance: 'GOOD', comment: 'Helped two teammates debug.' } },
-      { clubName: 'Debate Society', activities: 0, months: [], latest: null },
+      { clubName: 'Robotics Club', activities: 3, months: ['2026-10'], byMonth: [{ month: '2026-10', activities: 3, latest: { title: 'Community demo day', performance: 'GOOD', comment: 'Helped two teammates debug.', punctuality: 'ALWAYS_ON_TIME', participation: 'ACTIVE', conduct: 'GOOD' } }], latest: { title: 'Community demo day', month: '2026-10', performance: 'GOOD', comment: 'Helped two teammates debug.' },
+        mix: { punctuality: { ALWAYS_ON_TIME: 2, OCCASIONALLY_LATE: 1 }, performance: { GOOD: 2, EXCELLENT: 1 }, participation: { ACTIVE: 2, HIGHLY_ENGAGED: 1 }, conduct: { GOOD: 3 } } },
+      { clubName: 'Debate Society', activities: 0, months: [], byMonth: [], latest: null, mix: { punctuality: {}, performance: {}, participation: {}, conduct: {} } },
     ],
   });
   fs.writeFileSync(path.join(OUT, '01-student-report-subjects.pdf'), Buffer.from(student.doc.output('arraybuffer') as ArrayBuffer));
@@ -91,6 +92,17 @@ async function main() {
   const classPdf = await buildClassSummaryPdf({
     school: 'International Maarif Schools', period,
     summaries: [...groupReports(allRows, RULES)], comparison: groupReportsByMonth(allRows, RULES), rules: RULES,
+    clubs: {
+      s1: [
+        { clubName: 'Robotics Club', activities: 3, months: ['2026-10'], byMonth: [{ month: '2026-10', activities: 3, latest: { title: 'Community demo day', performance: 'GOOD', comment: 'Helped two teammates debug.' } }], latest: { title: 'Community demo day', month: '2026-10', performance: 'GOOD', comment: 'Helped two teammates debug.' },
+mix: { punctuality: { ALWAYS_ON_TIME: 2, OCCASIONALLY_LATE: 1 }, performance: { GOOD: 2, EXCELLENT: 1 }, participation: { ACTIVE: 2, MODERATE: 1 }, conduct: { GOOD: 3 } } },
+      ],
+      s2: [
+        { clubName: 'Debate Society', activities: 1, months: ['2026-10'], byMonth: [{ month: '2026-10', activities: 1, latest: { title: 'Public speaking workshop', performance: 'EXCELLENT', comment: 'Confident opening statement.' } }], latest: { title: 'Public speaking workshop', month: '2026-10', performance: 'EXCELLENT', comment: 'Confident opening statement.' },
+          mix: { punctuality: { ALWAYS_ON_TIME: 1 }, performance: { EXCELLENT: 1 }, participation: { MODERATE: 1 }, conduct: { GOOD: 1 } } },
+        { clubName: 'Robotics Club', activities: 0, months: [], byMonth: [], latest: null, mix: { punctuality: {}, performance: {}, participation: {}, conduct: {} } },
+      ],
+    },
   });
   fs.writeFileSync(path.join(OUT, '02-class-summary.pdf'), Buffer.from(classPdf.doc.output('arraybuffer') as ArrayBuffer));
   written.push('02-class-summary.pdf');
@@ -104,7 +116,7 @@ async function main() {
   };
   const clubRows = [
     { activityId: 'a1', activityDate: '2026-10-08', title: 'Robotics build session', status: 'APPROVED', punctuality: 'ALWAYS_ON_TIME', performance: 'GOOD', participation: 'ACTIVE', conduct: 'GOOD', comment: 'Led the chassis assembly.' },
-    { activityId: 'a2', activityDate: '2026-10-15', title: 'Competition practice', status: 'APPROVED', punctuality: 'USUALLY_ON_TIME', performance: 'EXCELLENT', participation: 'HIGHLY_ENGAGED', conduct: 'GOOD', comment: 'Helped two teammates debug.' },
+    { activityId: 'a2', activityDate: '2026-10-15', title: 'Competition practice', status: 'APPROVED', punctuality: 'USUALLY_ON_TIME', performance: 'EXCELLENT', participation: 'MODERATE', conduct: 'GOOD', comment: 'Helped two teammates debug.' },
     { activityId: 'a3', activityDate: '2026-10-22', title: 'Community demo day', status: 'SUBMITTED', punctuality: 'ALWAYS_ON_TIME', performance: 'GOOD', participation: 'ACTIVE', conduct: 'GOOD', comment: null },
   ];
   const club = await buildClubStudentReport({

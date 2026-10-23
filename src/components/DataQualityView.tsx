@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, FileText, UserX, BookOpen, RefreshCw } from 'lucide-react';
 import PeriodPicker from './PeriodPicker';
 import { periodLabel, monthLabelShort, type Period } from '@/lib/period';
@@ -60,19 +60,22 @@ export default function DataQualityView({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadData = (r: { from: string; to: string }) => {
-    setLoading(true);
-    setError(null);
+  const loadData = useCallback((r: { from: string; to: string }) => {
+    let cancelled = false;
+    // Deferred so the loading flag is not written synchronously from an effect body.
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setLoading(true);
+      setError(null);
+    });
     api('dataQuality', { ...(r.from ? { from: r.from } : {}), ...(r.to ? { to: r.to } : {}) })
-      .then((d) => setData(d))
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  };
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : 'Could not load the data quality report.'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [api]);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- loading flag for a fetch triggered by the date range
-    loadData(range);
-  }, [range]);
+  useEffect(() => loadData(range), [loadData, range]);
 
   return (
     <div className="panel data-quality-panel">

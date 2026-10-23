@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   LayoutDashboard,
   ClipboardList,
@@ -47,6 +47,7 @@ import ClubsView from '@/components/ClubsView';
 import MonthlyEntryView from '@/components/MonthlyEntryView';
 import PeriodPicker from '@/components/PeriodPicker';
 import { resultTrend, type Observation, type Rules, type StudentClubSummary, type SubjectComparison } from '@/lib/reporting';
+import { punctualityLabels, type PunctualityKey } from '@/lib/monthly';
 import { thisMonthPeriod, buildPeriod, periodLabel, periodSlug, monthLabel, shiftDays, type Period } from '@/lib/period';
 import { downloadClassSummaryPdf, downloadClassReportsZip, pretty } from '@/lib/reportPdf';
 import { importFields, requiredImportFields, safeCsvCell, toCsv, type ImportKind } from '@/lib/importing';
@@ -163,6 +164,9 @@ function LogoField({
       </label>
       {value && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {/* School logos are user-uploaded and commonly data: URLs with an onError fallback;
+              next/image cannot optimize data: sources and is unreliable on Cloudflare Workers. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={value}
             alt="Logo preview"
@@ -278,11 +282,20 @@ const fieldMap: Record<string, { key: string; label: string; type?: string; opti
   ],
 };
 
+/** Parses a response defensively: a proxy/HTML error page must not surface as a JSON syntax error. */
+async function parseJson(r: Response) {
+  try {
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
 async function api(view: string, params: Record<string, string> = {}, init?: RequestInit) {
   const q = new URLSearchParams({ view, ...params });
   const r = await fetch(`/api/app?${q.toString()}`, init);
-  const data = await r.json();
-  if (!r.ok) throw Error(data.error || 'Request failed.');
+  const data = await parseJson(r);
+  if (!r.ok) throw Error(data?.error || `Request failed (HTTP ${r.status}).`);
   return data;
 }
 
@@ -292,8 +305,8 @@ async function post(action: string, data: unknown, extra: Record<string, unknown
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, data, ...extra }),
   });
-  const res = await r.json();
-  if (!r.ok) throw Error(res.error || 'Request failed.');
+  const res = await parseJson(r);
+  if (!r.ok) throw Error(res?.error || `Request failed (HTTP ${r.status}).`);
   return res;
 }
 
@@ -427,6 +440,10 @@ export default function Home() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [login, setLogin] = useState({ identifier: '', password: '' });
   const [overview, setOverview] = useState<OverviewData | null>(null);
+  // Mirrors `overview` so the session-start effect can read today's date without depending on it
+  // (a dependency there would re-run the effect once the first response lands).
+  const overviewRef = useRef<OverviewData | null>(null);
+  useEffect(() => { overviewRef.current = overview; }, [overview]);
 
   const [ref, setRef] = useState<Ref | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
@@ -434,7 +451,6 @@ export default function Home() {
   const [studentsHasMore, setStudentsHasMore] = useState(false);
   const [selectedClass, setSelectedClass] = useState('');
   const [studentSort, setStudentSort] = useState<'name' | 'class'>('name');
-  const [selectedSubject, setSelectedSubject] = useState('');
   const [reports, setReports] = useState<{ id: string; lessonDate: string; topic: string; status: string; className: string; subjectName: string; teacherName: string; reviewComment?: string | null; recordsCount?: number; rosterCount?: number; completionRate?: number; kind?: 'lesson' | 'monthly'; month?: string }[]>([]);
   // The report history is fetched on its own, so bumping this counter is how a review, delete or
   // filter change asks for a fresh copy instead of showing yesterday's status.
@@ -507,6 +523,8 @@ const [busy, setBusy] = useState(false);
     assignments?: { created: number; updated: number };
     credentials?: { teacherId: string; name: string; email: string; username: string; password: string; emailProvided: boolean }[];
   } | null>(null);
+  // Row indexes whose generated password the admin has explicitly revealed.
+  const [revealedPasswords, setRevealedPasswords] = useState<Set<number>>(new Set());
   const [teacherSearch, setTeacherSearch] = useState('');
   const [teacherPage, setTeacherPage] = useState(0);
   const [teacherPageSize] = useState(10);
@@ -517,7 +535,11 @@ const [busy, setBusy] = useState(false);
   const [logoOk, setLogoOk] = useState(true);
   const [loginLogo, setLoginLogo] = useState<string | null>(null);
 
+  // A counter, not a boolean: overlapping run() calls must not clear busy while another
+  // action is still in flight.
+  const inFlight = useRef(0);
   const run = async (fn: () => Promise<void>) => {
+    inFlight.current += 1;
     setBusy(true);
     setError(null);
     try {
@@ -525,7 +547,11 @@ const [busy, setBusy] = useState(false);
     } catch (e: any) {
       setError(e.message);
     } finally {
-      setBusy(false);
+      inFlight.current -= 1;
+      if (inFlight.current <= 0) {
+        inFlight.current = 0;
+        setBusy(false);
+      }
     }
   };
 
@@ -537,6 +563,10 @@ const [busy, setBusy] = useState(false);
     if (r) {
       setRef(r);
       setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(today).from, to: today }));
+    } else {
+      // Reference data drives every Management picker. Silently keeping a stale copy after a
+      // mutation is worse than telling the user the refresh did not fully succeed.
+      setLoadError('Some reference data could not be refreshed. Reload the page if pickers look out of date.');
     }
     // Reviews, returns and deletes all land in the report history panel below, so every mutation
     // goes through refresh() and must pull that list again too.
@@ -587,6 +617,9 @@ const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!user) return;
+    // Depend only on the user. Depending on overview?.today as well made this re-run the moment
+    // the first overview response landed, fetching both endpoints twice on every session start.
+    const today = overviewRef.current?.today;
     api('overview')
       .then((o) => { setOverview(normalizeOverview(o)); setLoadError(null); })
       .catch((e) => { setError(e.message); setLoadError(e.message); });
@@ -594,14 +627,14 @@ const [busy, setBusy] = useState(false);
       .then((r) => {
         if (r) {
           setRef(r);
-          const today = r.today || overview?.today;
-          setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(today).from, to: today }));
+          const day = r.today || today;
+          setMonthlyPeriod((p) => (p.from || p.to ? p : { from: thisMonthPeriod(day).from, to: day }));
         }
       })
       // Without the reference data every picker is empty, so a silent catch here would leave the
       // whole app looking broken for no visible reason.
       .catch((e) => { setError(e.message); setLoadError(e.message); });
-  }, [user, overview?.today]);
+  }, [user]);
 
   // Search-as-you-type: hold the request until typing settles, and restart pagination whenever
   // the term changes so page 2 of the old query is not shown for the new one.
@@ -647,10 +680,12 @@ const [busy, setBusy] = useState(false);
             setStudentsHasMore(false);
           }
         }
-        if (page === 'organizations') {
+        // Role-gated the same way the render guards are, so a teacher never fires a request
+        // the API will only reject.
+        if (page === 'organizations' && user.role === 'SUPER_ADMIN') {
           setOrganizations(await api('organizations', {}, { signal: ctrl.signal }).then((d) => d.organizations));
         }
-        if (page === 'audit') {
+        if (page === 'audit' && ['ADMIN', 'SUPER_ADMIN'].includes(user.role)) {
           setAuditLogs(await api('audit', {}, { signal: ctrl.signal }).then((d) => d.logs));
         }
         if (page === 'settings' && user.role === 'ADMIN') {
@@ -665,8 +700,8 @@ const [busy, setBusy] = useState(false);
         // Never keep the previous cohort's rows on screen under a filter that just failed to load.
         if (page === 'reports') setReports([]);
         if (page === 'students') { setStudents([]); setStudentsHasMore(false); }
-        if (page === 'organizations') setOrganizations([]);
-        if (page === 'audit') setAuditLogs([]);
+        if (page === 'organizations' && user.role === 'SUPER_ADMIN') setOrganizations([]);
+        if (page === 'audit' && ['ADMIN', 'SUPER_ADMIN'].includes(user.role)) setAuditLogs([]);
         if (page === 'settings' && user.role === 'ADMIN') setConfig(null);
       }
     };
@@ -769,7 +804,13 @@ const [busy, setBusy] = useState(false);
       const d = await res.json();
       if (!res.ok) throw Error(d.error || 'Sign in failed.');
 
-      const me = await fetch('/api/auth').then((r) => r.json());
+      const me = await fetch('/api/auth').then((r) => r.json()).catch(() => null);
+      // A missing or malformed session response must fall back to the sign-in form,
+      // never strand the app on the undefined-user loading screen.
+      if (!me?.user) {
+        setUser(null);
+        throw Error('Signed in, but your session could not be loaded. Please sign in again.');
+      }
       setUser(me.user);
       setPage('overview');
       await refresh();
@@ -800,16 +841,6 @@ const [busy, setBusy] = useState(false);
   };
 
   const activeYear = ref?.years?.find((y) => y.active) || ref?.years?.[0];
-
-  const currentClassAssignment = useMemo(() => {
-    if (!overview || !selectedClass || !selectedSubject) return null;
-    return overview.assignments.find((a) => a.classId === selectedClass && a.subjectId === selectedSubject) || null;
-  }, [overview, selectedClass, selectedSubject]);
-
-  const classStudents = useMemo(() => {
-    if (!ref || !monthlyClass) return [];
-    return students.filter((s) => s.classId === monthlyClass);
-  }, [students, monthlyClass, ref]);
 
   const filteredManagedTeachers = useMemo(() => {
     const rows = (ref?.teachers || []).filter((teacher) => {
@@ -1316,6 +1347,9 @@ const [busy, setBusy] = useState(false);
         <div className="login-card">
           <div className="login-brand">
             {loginLogo || logoOk ? (
+              // School logos may be data: URLs, which next/image cannot optimize; kept as a
+              // plain img with an onError fallback for Cloudflare Workers.
+              // eslint-disable-next-line @next/next/no-img-element
               <img
                 className="login-logo"
                 src={loginLogo || '/icons/school_logo.png'}
@@ -1370,6 +1404,7 @@ const [busy, setBusy] = useState(false);
       <aside className={`sidebar ${mobile ? 'sidebar-open' : ''}`}>
         <div className="sidebar-brand">
           {ref?.organization?.logoUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element -- logo may be a data: URL
             <img
               className="sidebar-logo"
               src={ref.organization.logoUrl}
@@ -1706,6 +1741,10 @@ const [busy, setBusy] = useState(false);
           )}
 
           {/* ================= PAGE: MONTHLY RECORD ENTRY (§193) ================= */}
+          {page === 'monthlyRecord' && user.role !== 'SUPER_ADMIN' && !ref && (
+            loadError ? <LoadErrorPanel message={loadError} onRetry={() => run(async () => { await refresh(); })} />
+                      : <Empty title="Loading monthly entry" detail="Fetching classes, subjects and teachers." />
+          )}
           {page === 'monthlyRecord' && user.role !== 'SUPER_ADMIN' && ref && (
             <MonthlyEntryView
               api={api}
@@ -1767,6 +1806,9 @@ const [busy, setBusy] = useState(false);
                           const absent = r.attendanceStatus === 'ABSENT';
                           const cell = (v: string | null | undefined) =>
                             absent ? NOT_APPLICABLE : v ? pretty(v) : '—';
+                          // The retired seven spellings must read as the five the rest of the app shows.
+                          const puncCell = (v: string | null | undefined) =>
+                            absent ? NOT_APPLICABLE : v ? (punctualityLabels[v as PunctualityKey] ?? pretty(v)) : '—';
                           return (
                           <tr key={r.id} style={absent ? { background: '#fef2f2' } : undefined}>
                             <td>
@@ -1776,7 +1818,7 @@ const [busy, setBusy] = useState(false);
                             <td><Badge status={r.attendanceStatus} /></td>
                             <td>{cell(r.performance)}</td>
                             <td>{cell(r.conduct)}</td>
-                            <td>{cell(r.punctuality)}</td>
+                            <td>{puncCell(r.punctuality)}</td>
                             <td>{cell(r.participation)}</td>
                             <td>{cell(r.homework)}</td>
                             <td style={{ fontSize: 12 }}>{absent ? NOT_APPLICABLE : r.comment || '—'}</td>
@@ -1796,7 +1838,9 @@ const [busy, setBusy] = useState(false);
                         <Clock3 size={14} /> Correct Date
                       </button>
                     ) : (
-                      ['DRAFT', 'RETURNED'].includes(reviewDetail.lesson.status) && (
+                      // Only DRAFT lessons are deletable server-side; offering this for a
+                      // RETURNED lesson just produces a 403 toast.
+                      reviewDetail.lesson.status === 'DRAFT' && (
                         <button
                           className="btn outline"
                           style={{ color: '#c67a53', borderColor: '#c67a53' }}
@@ -1905,7 +1949,7 @@ const [busy, setBusy] = useState(false);
                                   <div style={{ fontSize: 11, color: '#748792' }}>{info?.studentCode || ''}</div>
                                 </td>
                                 <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
-                                  <strong style={{ color: '#0f766e' }}>{r.punctuality ? pretty(r.punctuality) : '—'}</strong>
+                                  <strong style={{ color: '#0f766e' }}>{r.punctuality ? (punctualityLabels[r.punctuality as PunctualityKey] ?? pretty(r.punctuality)) : '—'}</strong>
                                 </td>
                                 <td>{r.performance ? pretty(r.performance) : '—'}</td>
                                 <td>{r.conduct ? pretty(r.conduct) : '—'}</td>
@@ -2358,6 +2402,7 @@ const [busy, setBusy] = useState(false);
                             await downloadClassSummaryPdf({
                               school: monthly.organization, period: monthly.period, closedMonths: monthly.closedMonths,
                               summaries: monthly.summaries, comparison: monthly.comparison, rules: monthly.rules,
+                              clubs: monthly.clubs,
                               logoUrl: ref?.organization?.logoUrl || '/icons/school_logo.png',
                             });
                             setNotice('Class summary PDF downloaded.');
@@ -2369,7 +2414,7 @@ const [busy, setBusy] = useState(false);
                       <button className="btn outline" onClick={exportMonthlyCsv}>
                         <Download size={15} /> Export CSV
                       </button>
-                      <button className="btn primary" onClick={() => exportClassMonthlyExcel(true)}>
+                      <button className="btn primary" disabled={busy} onClick={() => run(async () => { await exportClassMonthlyExcel(true); })}>
                         <Download size={15} /> Class Monthly Excel
                       </button>
                     </div>
@@ -2507,6 +2552,10 @@ const [busy, setBusy] = useState(false);
           )}
 
           {/* ================= PAGE: CLUBS & ACTIVITIES ================= */}
+          {page === 'clubs' && user.role !== 'SUPER_ADMIN' && !ref && (
+            loadError ? <LoadErrorPanel message={loadError} onRetry={() => run(async () => { await refresh(); })} />
+                      : <Empty title="Loading clubs" detail="Fetching students, classes and teachers." />
+          )}
           {page === 'clubs' && user.role !== 'SUPER_ADMIN' && ref && (
             <ClubsView
               api={api}
@@ -2843,6 +2892,7 @@ const [busy, setBusy] = useState(false);
                       setImportHeaders([]);
                       setImportNotes([]);
                       setImportResult(null);
+                      setRevealedPasswords(new Set());
                     }}
                   >
                     Import {pretty(k)}
@@ -2872,6 +2922,7 @@ const [busy, setBusy] = useState(false);
                       setMapping(Object.fromEntries(importFields[importKind].map((k) => [k, parsed.headers.includes(k) ? k : ''])));
                       setImportRows(parsed.rows);
                       setImportResult(null);
+                      setRevealedPasswords(new Set());
                     });
                   }}
                 />
@@ -2948,8 +2999,11 @@ const [busy, setBusy] = useState(false);
                               const rows = importRows.map((r) =>
                                 Object.fromEntries(importFields[importKind].map((k) => [k, r[mapping[k]] || '']))
                               );
-                              const res = await post('import', { kind: importKind, rows });
-                              setImportResult(res);
+                               const res = await post('import', { kind: importKind, rows });
+                               setImportResult(res);
+                               // A fresh result starts masked again: row 3 of the last import must not
+                               // reveal row 3 of this one.
+                               setRevealedPasswords(new Set());
                               const parts = [`${res.imported} imported`, `${res.updated} updated`, `${res.skipped} errors`];
                               if (res.credentials?.length) parts.push(`${res.credentials.length} passwords generated and downloaded as teacher-passwords CSV`);
                               setNotice(`Import finished: ${parts.join(', ')}.`);
@@ -2962,7 +3016,7 @@ const [busy, setBusy] = useState(false);
                     >
                       Execute Import
                     </button>
-                    <button className="btn outline" onClick={() => setImportResult(null)}>
+                    <button className="btn outline" onClick={() => { setImportResult(null); setRevealedPasswords(new Set()); }}>
                       Clear Results
                     </button>
                   </div>
@@ -3026,6 +3080,8 @@ const [busy, setBusy] = useState(false);
                             </tr>
                           </thead>
                           <tbody>
+                            {/* Passwords ship in the downloadable CSV; keeping them masked here
+                                avoids leaving every generated password in the DOM by default. */}
                             {importResult.credentials.map((c, i) => (
                               <tr key={i}>
                                 <td>{c.name}</td>
@@ -3034,7 +3090,24 @@ const [busy, setBusy] = useState(false);
                                   {c.email}
                                   {!c.emailProvided ? ' (pending)' : ''}
                                 </td>
-                                <td>{c.password}</td>
+                                <td>
+                                  <span style={{ marginRight: 8 }}>
+                                    {revealedPasswords.has(i) ? c.password : '••••••••'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="btn outline"
+                                    style={{ padding: '2px 6px', fontSize: 11 }}
+                                    aria-label={revealedPasswords.has(i) ? 'Hide password' : 'Reveal password'}
+                                    onClick={() => setRevealedPasswords((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(i)) next.delete(i); else next.add(i);
+                                      return next;
+                                    })}
+                                  >
+                                    {revealedPasswords.has(i) ? 'Hide' : 'Reveal'}
+                                  </button>
+                                </td>
                               </tr>
                             ))}
                           </tbody>

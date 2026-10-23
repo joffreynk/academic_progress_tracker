@@ -1,6 +1,7 @@
 'use client';
-import { monthLabel, monthLabelShort, periodLabel, periodMonthsLabel, periodSlug, type Period } from '@/lib/period';
+import { monthLabel, monthLabelShort, periodLabel, periodSlug, type Period } from '@/lib/period';
 import { FALLBACK_LOGO_DATA_URL } from '@/lib/defaultLogo';
+import { conductLevels, foldPunctualityTally, homeworkLevels, participationLevels, performanceLevels, punctualityLabels, punctualityLevels } from '@/lib/monthly';
 import { resultTrend, summarize, summarizeByMonth, type Observation, type Rules, type StudentClubSummary, type SubjectComparison, type SubjectMonthSummary } from '@/lib/reporting';
 
 type Summary = ReturnType<typeof import('@/lib/reporting').summarize> & {
@@ -20,14 +21,20 @@ const BAD: Color = [186, 96, 74];
 export const pretty = (s: string) => s.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 
 /** `Needs Improvement 52%, Good 30%` — each category's share of every rating in the set, largest first. */
-export const percentText = (values: Record<string, number>) => {
+export const percentText = (values: Record<string, number>, labels: Record<string, string> = {}) => {
   const total = Object.values(values).reduce((a, b) => a + b, 0);
   if (!total) return 'No observations';
   return Object.entries(values)
     .filter(([, v]) => v > 0)
     .sort((a, b) => b[1] - a[1])
-    .map(([k, v]) => `${pretty(k)} ${Math.round((v / total) * 100)}%`)
+    .map(([k, v]) => `${labels[k] ?? pretty(k)} ${Math.round((v / total) * 100)}%`)
     .join(', ');
+};
+
+/** The full scale of a criterion in canonical order — every category prints, even at 0%. */
+export const percentLinesScale = (values: Record<string, number>, scale: readonly string[], labels: Record<string, string> = {}) => {
+  const total = Object.values(values).reduce((a, b) => a + b, 0);
+  return scale.map((k) => `${labels[k] ?? pretty(k)} ${total ? Math.round(((values[k] || 0) / total) * 100) : 0}%`).join(';\n');
 };
 
 /** One child's academic profile across every subject: the headline result plus the rating mix behind it. */
@@ -69,6 +76,7 @@ const todayKey = () => new Date().toISOString().slice(0, 10);
 const toneFor = (value: string): Color => {
   const v = String(value).toUpperCase();
   if (v.includes('NO DATA')) return MUTED;
+  if (v.includes('ON TIME')) return TEAL;
   if (v.includes('NEEDS') || v.includes('FREQUENTLY')) return BAD;
   if (v.includes('OCCASIONALLY') || v.includes('RARELY') || v.includes('PASSIVE')) return WARN;
   if (v.includes('ABSENT')) return BAD;
@@ -256,13 +264,18 @@ class PdfWriter {
   kpiStrip(items: { label: string; value?: string; sub?: string; tone?: Color }[]) {
     if (!items.length) return;
     const gap = 6;
-    const maxLines = 5;
+    // Punctuality can stack up to seven lines (the five categories plus the two
+    // retired ones still stored on old rows), so a card must be able to list
+    // every share without ellipsizing the tail.
+    const maxLines = 7;
     const boxWidth = (this.content - gap * (items.length - 1)) / items.length;
     const inner = boxWidth - 12;
     const plans = items.map((item) => {
       // A headline card keeps its small supporting line; a shares-only card gives the mix more room.
-      const size = item.value ? 6 : 7.5;
-      const lineH = item.value ? 7.5 : 9.5;
+      // Shares render at 7pt: at 7.5pt strings like "Often Absent 15%;" exceed the 5-card
+      // width, wrap to a second line, and push the last category into an ellipsis.
+      const size = item.value ? 6 : 7;
+      const lineH = item.value ? 7.5 : 9;
       const bodyTop = item.value ? 31 : 24;
       const body = item.sub ? this.clip(item.sub, size, inner, maxLines) : '';
       return { item, size, lineH, bodyTop, body, lines: body ? this.wrap(body, size, inner).length : 0 };
@@ -583,11 +596,16 @@ export async function buildStudentPdf(input: {
     { label: 'Period', value: `${period.from} to ${period.to}` },
   ]);
 
+  w.space(6);
+  w.text(`RECORDED ${overall.lessons} lesson report${overall.lessons === 1 ? '' : 's'} in the period`, { size: 8, bold: true, color: MUTED, gap: 10 });
+
+  // Every card prints its full scale in canonical order — categories with no observations show 0%.
   w.kpiStrip([
-    { label: 'Performance', sub: percentText(overall.performance), tone: toneFor(overall.performanceResult) },
-    { label: 'Punctuality', sub: percentText(overall.punctuality), tone: toneFor(overall.punctualityResult) },
-    { label: 'Homework', sub: percentText(overall.homework), tone: toneFor(overall.homeworkResult) },
-    { label: 'Conduct', sub: percentText(overall.conduct), tone: toneFor(overall.conductResult) },
+      { label: 'Punctuality', sub: percentLinesScale(foldPunctualityTally(overall.punctuality), punctualityLevels, punctualityLabels), tone: toneFor(overall.punctualityResult) },
+    { label: 'Performance', sub: percentLinesScale(overall.performance, performanceLevels), tone: toneFor(overall.performanceResult) },
+    { label: 'Participation', sub: percentLinesScale(overall.participation, participationLevels), tone: toneFor(overall.participationResult) },
+    { label: 'Homework', sub: percentLinesScale(overall.homework, homeworkLevels), tone: toneFor(overall.homeworkResult) },
+    { label: 'Conduct', sub: percentLinesScale(overall.conduct, conductLevels), tone: toneFor(overall.conductResult) },
   ]);
 
   let sectionNo = 1;
@@ -625,15 +643,6 @@ export async function buildStudentPdf(input: {
   }
   w.table(head, rows, { fontSize: font, widths, pad });
 
-  w.sectionCompact(`${sectionNo++}. Punctuality & discipline`);
-  w.facts([
-    { label: 'Punctuality', value: percentText(overall.punctuality) },
-    { label: 'Homework', value: percentText(overall.homework) },
-    { label: 'Participation', value: percentText(overall.participation) },
-    { label: 'Conduct', value: percentText(overall.conduct) },
-    { label: 'Recorded', value: `${overall.lessons} lesson report${overall.lessons === 1 ? '' : 's'} in the period` },
-  ], { size: 7.5, labelSize: 6, labelWidth: 84, lineH: 10, gap: 4 });
-
   const monthHead = ['CRITERION', ...months.map((m) => `${monthLabelShort(m)}${closedMonths.includes(m) ? ' (closed)' : ''}`)];
   const monthShare = (w.content - 150) / Math.max(1, months.length);
   const monthWidths = fitWidths(w.content, [150, ...months.map(() => monthShare)]);
@@ -656,17 +665,43 @@ export async function buildStudentPdf(input: {
     }
   }
 
-  if (clubs.length && w.fits(17 + 24)) {
-    w.sectionCompact(`${sectionNo++}. Clubs & activities`);
+  if (clubs.length) {
+    const clubFont = 6.5;
+    const clubPad = 2.5;
+    // One column per recorded criterion — the same five punctuality labels the KPI card uses,
+    // plus performance / participation / conduct, and the written comment.
+    const clubWidths = fitWidths(w.content, [84, 64, 40, 84, 58, 52, 46, 44, 50]);
+    const clubHead = ['CLUB', 'MONTH', 'ACTIV.', 'LATEST ACTIVITY', 'PUNCTUALITY', 'PERFORMANCE', 'PARTIC.', 'CONDUCT', 'COMMENT'];
+    const rating = (v: string | null | undefined, width: number) => (v ? w.clip(pretty(v), clubFont, width - clubPad * 2, 2) : '—');
+    const punct = (v: string | null | undefined, width: number) => (v ? w.clip(punctualityLabels[v as keyof typeof punctualityLabels] ?? pretty(v), clubFont, width - clubPad * 2, 2) : '—');
+    const clubRows: string[][] = [];
     for (const club of clubs) {
-      const monthsText = club.months.length ? periodMonthsLabel(club.months) : '';
-      const summary = club.activities
-        ? `${club.activities} activit${club.activities === 1 ? 'y' : 'ies'}${monthsText ? ` · ${monthsText}` : ''}${club.latest ? ` · Latest: ${club.latest.title}${club.latest.comment ? ` (${club.latest.comment})` : ''}` : ''}`
-        : `Member · no activities recorded${monthsText ? ` in ${monthsText}` : ' in this period'}`;
-      const line = `${club.clubName} — ${summary}`;
-      const height = w.wrap(line, 7.5, w.content - 12).length * 10.5 + 4;
-      if (!w.fits(height)) break;
-      w.bullet(line, { size: 7.5 });
+      // One row per month in the selected period; fall back to the flat months list for older payloads.
+      const byMonth = club.byMonth?.length
+        ? club.byMonth
+        : club.months.map((m) => ({ month: m, activities: club.activities, latest: club.latest && club.latest.month === m ? { title: club.latest.title, performance: club.latest.performance, comment: club.latest.comment, punctuality: club.latest.punctuality ?? null, participation: club.latest.participation ?? null, conduct: club.latest.conduct ?? null } : null }));
+      if (!byMonth.length) {
+        clubRows.push([w.clip(club.clubName, clubFont, clubWidths[0] - clubPad * 2, 2), '—', '0', 'Member · no activities in this period', '—', '—', '—', '—', '—']);
+        continue;
+      }
+      for (const m of byMonth) {
+        clubRows.push([
+          w.clip(club.clubName, clubFont, clubWidths[0] - clubPad * 2, 2),
+          w.clip(monthLabel(m.month), clubFont, clubWidths[1] - clubPad * 2, 1),
+          `${m.activities}`,
+          w.clip(m.latest?.title || '—', clubFont, clubWidths[3] - clubPad * 2, 2),
+          punct(m.latest?.punctuality, clubWidths[4]),
+          rating(m.latest?.performance, clubWidths[5]),
+          rating(m.latest?.participation, clubWidths[6]),
+          rating(m.latest?.conduct, clubWidths[7]),
+          w.clip(m.latest?.comment || '—', clubFont, clubWidths[8] - clubPad * 2, 2),
+        ]);
+      }
+    }
+    const clubEstimate = w.estimateTable(clubHead, clubRows, clubWidths, clubFont, clubPad, true) + 17 + 10;
+    if (w.fits(clubEstimate)) {
+      w.sectionCompact(`${sectionNo++}. Clubs & activities`);
+      w.table(clubHead, clubRows, { fontSize: clubFont, widths: clubWidths, pad: clubPad });
     }
   }
 
@@ -733,9 +768,10 @@ export async function downloadStudentPdf(input: Parameters<typeof buildStudentPd
 /** Builds the class document without touching the DOM, so it can be unit tested or reused. */
 export async function buildClassSummaryPdf(input: {
   school: string; period: Period; closedMonths?: string[]; summaries: Summary[]; comparison?: SubjectComparison[]; rules: Rules; fileTag?: string;
+  clubs?: Record<string, StudentClubSummary[]>;
   logoDataUrl?: string | null;
 }): Promise<{ doc: Doc; filename: string }> {
-  const { school, period, closedMonths = [], summaries, comparison = [], logoDataUrl = null } = input;
+  const { school, period, closedMonths = [], summaries, comparison = [], clubs = {}, logoDataUrl = null } = input;
   const months = period.months;
   const doc = await newDoc('landscape');
   const w = new PdfWriter(doc);
@@ -759,7 +795,7 @@ export async function buildClassSummaryPdf(input: {
     { label: 'Students covered', value: `${students} student${students === 1 ? '' : 's'}` },
     { label: 'Subject rows', value: `${summaries.length} student-subject summar${summaries.length === 1 ? 'y' : 'ies'}` },
     { label: 'Recorded lessons', value: `${totals.lessons} lesson report${totals.lessons === 1 ? '' : 's'}` },
-    { label: 'Punctuality', value: percentText(totals.punctuality) },
+    { label: 'Punctuality', value: percentText(foldPunctualityTally(totals.punctuality), punctualityLabels) },
     { label: 'Performance', value: percentText(totals.performance) },
   ]);
 
@@ -771,8 +807,50 @@ export async function buildClassSummaryPdf(input: {
       s.homeworkResult, pretty(s.conductResult), s.punctualityResult,
     ]), { fontSize: 6.5 });
 
+  // §192: one row per club in the cohort — members, how many actually recorded
+  // activities this period, the student-activity records behind that, the rating
+  // mixes across every record, and the latest activity of them all.
+  let sectionNo = 2;
+  type ClubAgg = { members: number; active: number; records: number; latest: { title: string; month: string } | null; mix: { punctuality: Record<string, number>; performance: Record<string, number>; participation: Record<string, number>; conduct: Record<string, number> } };
+  const clubAgg = new Map<string, ClubAgg>();
+  const tally = (into: Record<string, number>, from: Record<string, number> | undefined) => {
+    for (const [k, v] of Object.entries(from ?? {})) if (v) into[k] = (into[k] || 0) + v;
+  };
+  for (const list of Object.values(clubs)) {
+    for (const c of list) {
+      let e = clubAgg.get(c.clubName);
+      if (!e) { e = { members: 0, active: 0, records: 0, latest: null, mix: { punctuality: {}, performance: {}, participation: {}, conduct: {} } }; clubAgg.set(c.clubName, e); }
+      e.members += 1;
+      if (c.activities > 0) {
+        e.active += 1;
+        e.records += c.activities;
+      }
+      if (c.mix) {
+        tally(e.mix.punctuality, c.mix.punctuality);
+        tally(e.mix.performance, c.mix.performance);
+        tally(e.mix.participation, c.mix.participation);
+        tally(e.mix.conduct, c.mix.conduct);
+      }
+      if (c.latest && (!e.latest || c.latest.month >= e.latest.month)) e.latest = { title: c.latest.title, month: c.latest.month };
+    }
+  }
+  if (clubAgg.size) {
+    // Keep the header on the same page as at least the first table rows.
+    w.need(90);
+    w.section(`${sectionNo++}. Clubs & activities`, 'One row per club the cohort belongs to. Records count each student-activity pairing; rating mixes span every recorded pairing in the period.');
+    w.table(['CLUB', 'MEMBERS', 'MEMBERS ACTIVE', 'STUDENT-ACTIVITY RECORDS', 'PUNCTUALITY', 'PERFORMANCE', 'PARTICIPATION', 'CONDUCT', 'LATEST ACTIVITY'],
+      [...clubAgg.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([name, e]) => [
+        name, String(e.members), String(e.active), String(e.records),
+        percentText(foldPunctualityTally(e.mix.punctuality), punctualityLabels),
+        percentText(e.mix.performance),
+        percentText(e.mix.participation),
+        percentText(e.mix.conduct),
+        e.latest ? `${monthLabelShort(e.latest.month)} · ${e.latest.title}` : '—',
+      ]), { fontSize: 6.5 });
+  }
+
   if (months.length > 1) {
-    w.section('2. Month-over-month coverage', 'Lesson volume and punctuality mix per month across the whole cohort. Every month in the period is listed, including months with no recorded lessons.');
+    w.section(`${sectionNo++}. Month-over-month coverage`, 'Lesson volume and punctuality mix per month across the whole cohort. Every month in the period is listed, including months with no recorded lessons.');
     w.table(['MONTH', 'STATUS', 'SUBJECT ROWS', 'LESSON REPORTS', 'STUDENTS', 'PUNCTUALITY MIX', 'PERFORMANCE MIX'],
       months.map((m) => {
         const groups = comparison.filter((c) => c.months.some((cm) => cm.month === m));
@@ -782,7 +860,7 @@ export async function buildClassSummaryPdf(input: {
         return [
           monthLabelShort(m), closedMonths.includes(m) ? 'Closed' : 'Open', String(cells.length),
           String(cells.reduce((a, s) => a + s.lessons, 0)), String(new Set(groups.map((c) => c.studentId)).size),
-          percentText(punctuality), percentText(performance),
+          percentText(foldPunctualityTally(punctuality), punctualityLabels), percentText(performance),
         ];
       }), { fontSize: 7 });
   }
@@ -890,12 +968,12 @@ export async function buildClubStudentReport(input: {
     // One header and the shares themselves: every rating as a share of the child's ratings
     // across all subjects (10 ratings → 5 Needs Improvement = 50%), no verdict repeated above them.
     { label: 'Performance', sub: percentText(subjectProfile.performance), tone: toneFor(subjectProfile.performanceResult) },
-    { label: 'Punctuality', sub: percentText(subjectProfile.punctuality), tone: toneFor(subjectProfile.punctualityResult) },
+    { label: 'Punctuality', sub: percentText(foldPunctualityTally(subjectProfile.punctuality), punctualityLabels), tone: toneFor(subjectProfile.punctualityResult) },
     { label: 'Homework', sub: percentText(subjectProfile.homework), tone: toneFor(subjectProfile.homeworkResult) },
     { label: 'Conduct', sub: percentText(subjectProfile.conduct), tone: toneFor(subjectProfile.conductResult) },
   ] : [
     activityCard,
-    { label: 'Punctuality', sub: percentText(tally('punctuality')), tone: toneFor(topValue(tally('punctuality'))) },
+    { label: 'Punctuality', sub: percentText(foldPunctualityTally(tally('punctuality')), punctualityLabels), tone: toneFor(topValue(foldPunctualityTally(tally('punctuality')))) },
     { label: 'Performance', sub: percentText(tally('performance')), tone: toneFor(topValue(tally('performance'))) },
     { label: 'Participation', sub: percentText(tally('participation')), tone: toneFor(topValue(tally('participation'))) },
     { label: 'Conduct', sub: percentText(tally('conduct')), tone: toneFor(topValue(tally('conduct'))) },
@@ -910,7 +988,7 @@ export async function buildClubStudentReport(input: {
       w.clip(clubActivityMonth(r.activityDate), font, widths[0] - pad * 2, 2),
       w.clip(r.title, font, widths[1] - pad * 2, 3),
       w.clip(pretty(r.status), font, widths[2] - pad * 2, 2),
-      w.clip(r.punctuality ? pretty(r.punctuality) : '—', font, widths[3] - pad * 2, 3),
+      w.clip(r.punctuality ? (punctualityLabels[r.punctuality as keyof typeof punctualityLabels] ?? pretty(r.punctuality)) : '—', font, widths[3] - pad * 2, 3),
       w.clip(r.performance ? pretty(r.performance) : '—', font, widths[4] - pad * 2, 2),
       w.clip(r.participation ? pretty(r.participation) : '—', font, widths[5] - pad * 2, 3),
       w.clip(r.conduct ? pretty(r.conduct) : '—', font, widths[6] - pad * 2, 3),

@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { AlertTriangle, CheckCircle, GraduationCap, RefreshCw } from 'lucide-react';
 
 interface Observation {
@@ -35,21 +35,24 @@ export default function BehaviourView({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const loadData = () => {
-    setLoading(true);
-    setLoadError(null);
+  const loadData = useCallback(() => {
+    let cancelled = false;
+    // Deferred so the loading flag is not written synchronously from an effect body.
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setLoading(true);
+      setLoadError(null);
+    });
     api('behaviourObservations', filterFollowUp ? { followUp: '1' } : {})
-      .then((d) => setObservations(d.observations || []))
+      .then((d) => { if (!cancelled) setObservations(d.observations || []); })
       // Swallowing this into the console left a silent empty table, which reads as "no records"
       // rather than "the request failed".
-      .catch((e) => setLoadError(e instanceof Error ? e.message : 'Could not load behaviour records.'))
-      .finally(() => setLoading(false));
-  };
+      .catch((e) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Could not load behaviour records.'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [api, filterFollowUp]);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- loading flag for a fetch triggered by the filter
-    loadData();
-  }, [filterFollowUp]);
+  useEffect(() => loadData(), [loadData]);
 
   const resolveFollowUp = async (id: string) => {
     try {

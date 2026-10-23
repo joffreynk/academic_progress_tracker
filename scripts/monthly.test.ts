@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 import test from 'node:test';
 import {
-  punctualityCounts, punctualityLabels, punctualityLevels, derivePunctuality, monthSessionDates, entryObservations,
+  punctualityCounts, punctualityLabels, punctualityLevels, foldPunctualityTally, derivePunctuality, monthSessionDates, entryObservations,
   combineAttendanceCounts, isValidMonth, monthOverlapsYear, monthlyEntryInput,
   type MonthlyStudentRow, type MonthlyEntrySource,
 } from '../src/lib/monthly';
@@ -31,9 +31,23 @@ test('monthly: every punctuality category maps to counts that total sessions hel
     }
   }
   assert.strictEqual(punctualityCounts(null, 20, RULES).present, 20, 'an unchosen draft row reads as on time');
-  assert.strictEqual(Object.keys(punctualityLabels).length, 7, 'seven labels');
-  assert.strictEqual(punctualityLabels.USUALLY_ON_TIME, 'Usually On Time');
-  assert.strictEqual(punctualityLabels.ALWAYS_ABSENT, 'Always Absent');
+  assert.strictEqual(Object.keys(punctualityLabels).length, 7, 'keys cover the five current categories plus the two legacy ones');
+  assert.strictEqual(punctualityLabels.ALWAYS_ON_TIME, 'On Time');
+  assert.strictEqual(punctualityLabels.FREQUENTLY_ABSENT, 'Often Absent');
+  assert.strictEqual(punctualityLabels.ALWAYS_ABSENT, 'Absent');
+  assert.strictEqual(punctualityLabels.USUALLY_ON_TIME, 'On Time', 'legacy labels fold into the current five');
+  assert.strictEqual(punctualityLabels.OCCASIONALLY_ABSENT, 'Often Absent', 'legacy labels fold into the current five');
+});
+
+test('monthly: retired categories fold into the current five so every surface shows the same labels', () => {
+  assert.deepStrictEqual(
+    foldPunctualityTally({ ALWAYS_ON_TIME: 4, USUALLY_ON_TIME: 3, OCCASIONALLY_ABSENT: 2, FREQUENTLY_ABSENT: 1, ALWAYS_ABSENT: 5 }),
+    { ALWAYS_ON_TIME: 7, FREQUENTLY_ABSENT: 3, ALWAYS_ABSENT: 5 },
+    'legacy keys merge into their nearest current category',
+  );
+  assert.deepStrictEqual(foldPunctualityTally({ USUALLY_ON_TIME: 2 }), { ALWAYS_ON_TIME: 2 });
+  assert.deepStrictEqual(foldPunctualityTally({}), {}, 'an empty tally stays empty');
+  assert.deepStrictEqual(foldPunctualityTally({ OCCASIONALLY_LATE: 0 }), {}, 'zero counts are dropped');
 });
 
 test('monthly: entry input accepts the punctuality enum and rejects anything else', () => {
@@ -42,6 +56,8 @@ test('monthly: entry input accepts the punctuality enum and rejects anything els
     assert.strictEqual(monthlyEntryInput.safeParse({ ...base, records: [{ studentId: 's1', punctuality }] }).success, true, punctuality);
   }
   assert.strictEqual(monthlyEntryInput.safeParse({ ...base, records: [{ studentId: 's1', punctuality: 'SOMETIMES_ABSENT' }] }).success, false);
+  assert.strictEqual(monthlyEntryInput.safeParse({ ...base, records: [{ studentId: 's1', punctuality: 'USUALLY_ON_TIME' }] }).success, true, 'the legacy key still validates so old drafts can be re-saved');
+  assert.strictEqual(monthlyEntryInput.safeParse({ ...base, records: [{ studentId: 's1', punctuality: 'OCCASIONALLY_ABSENT' }] }).success, true, 'the retired occasional-absence key still validates so old drafts can be re-saved');
   const legacy = monthlyEntryInput.safeParse({ ...base, records: [{ studentId: 's1', latePct: 60, absentPct: 45 }] });
   assert.strictEqual(legacy.success, true, 'legacy percentage keys are ignored, not fatal');
   if (legacy.success) {
@@ -82,7 +98,7 @@ test('monthly: derived late and absent rates match the selected category (§48)'
 });
 
 test('monthly: punctuality derives from the late rate (§48)', () => {
-  assert.strictEqual(derivePunctuality(20, 0, RULES), 'Always On Time');
+  assert.strictEqual(derivePunctuality(20, 0, RULES), 'On Time');
   assert.strictEqual(derivePunctuality(19, 1, RULES), 'Occasionally Late');
   assert.strictEqual(derivePunctuality(10, 10, RULES), 'Frequently Late');
   assert.strictEqual(derivePunctuality(0, 0, RULES), 'No data');
@@ -124,7 +140,7 @@ test('monthly: a frequently absent student reads as mostly absent with no latene
   const summary = summarize(observations, RULES);
   assert.deepStrictEqual([summary.attendance.PRESENT ?? 0, summary.attendance.LATE ?? 0, summary.attendance.ABSENT ?? 0], [10, 0, 10]);
   assert.strictEqual(summary.attendanceRate, 50);
-  assert.strictEqual(summary.punctualityResult, 'Frequently Absent', 'absence now surfaces through punctuality');
+  assert.strictEqual(summary.punctualityResult, 'Often Absent', 'absence now surfaces through punctuality');
   assert.strictEqual(summary.performanceResult, 'GOOD');
 });
 
@@ -140,7 +156,7 @@ test('monthly: every punctuality category round-trips into the report result', (
 });
 
 test('monthly: mixed punctuality reports the severity average, not a bare plurality', () => {
-  // Real class-10 case: "Always On Time" is the biggest single bucket (171) but
+  // Real class-10 case: "On Time" is the biggest single bucket (171) but
   // late/absent sessions are the majority together, so it must not win the headline.
   const observations = [
     ...entryObservations(entry({ id: 'e1', sessionsHeld: 171 }), [row({ punctuality: 'ALWAYS_ON_TIME' })], 'Class 10', 'Biology', 'A. Teacher', RULES),
@@ -150,8 +166,8 @@ test('monthly: mixed punctuality reports the severity average, not a bare plural
   ];
   const summary = summarize(observations, RULES);
   assert.strictEqual(summary.lessons, 343, 'every synthetic session counts');
-  // (171×3 + 111×1 + 36×−1 + 25×−2) / 343 = 1.57 → "Usually On Time".
-  assert.strictEqual(summary.punctualityResult, 'Usually On Time', 'severity average replaces the misleading plurality');
+  // (171×3 + 111×1 + 36×−1 + 25×−2) / 343 = 1.57 → rounds to 2 → "On Time".
+  assert.strictEqual(summary.punctualityResult, 'On Time', 'severity average replaces the misleading plurality');
   assert.strictEqual(summary.punctuality.ALWAYS_ON_TIME, 171, 'the raw distribution stays intact');
 });
 
